@@ -1,0 +1,52 @@
+{
+  "groups": [
+    {
+      "name": "app",
+      "type": "it.szn.prenotazionesale.config.AppConfig",
+      "sourceType": "it.szn.prenotazionesale.config.AppConfig"
+    },
+    {
+      "name": "app.azure",
+      "type": "it.szn.prenotazionesale.config.AppConfig$Azure",
+      "sourceType": "it.szn.prenotazionesale.config.AppConfig",
+      "sourceMethod": "public it.szn.prenotazionesale.config.AppConfig.Azure getAzure() "
+    },
+    {
+      "name": "app.cors",
+      "type": "it.szn.prenotazionesale.config.AppConfig$Cors",
+      "sourceType": "it.szn.prenotazionesale.config.AppConfig",
+      "sourceMethod": "public it.szn.prenotazionesale.config.AppConfig.Cors getCors() "
+    }
+  ],
+  "properties": [
+    {
+      "name": "app.admin-role",
+      "type": "java.lang.String",
+      "sourceType": "it.szn.prenotazionesale.config.AppConfig"
+    },
+    {
+      "name": "app.azure.client-id",
+      "type": "java.lang.String",
+      "sourceType": "it.szn.prenotazionesale.config.AppConfig$Azure"
+    },
+    {
+      "name": "app.azure.client-secret",
+      "type": "java.lang.String",
+      "sourceType": "it.szn.prenotazionesale.config.AppConfig$Azure"
+    },
+    {
+      "name": "app.azure.tenant-id",
+      "type": "java.lang.String",
+      "sourceType": "it.szn.prenotazionesale.config.AppConfig$Azure"
+    },
+    {
+      "name": "app.cors.allowed-origins",
+      "type": "java.lang.String",
+      "sourceType": "it.szn.prenotazionesale.config.AppConfig$Cors"
+    }
+  ],
+  "hints": [],
+  "ignored": {
+    "properties": []
+  }
+}
