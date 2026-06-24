@@ -10,6 +10,9 @@ import lombok.AllArgsConstructor;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -58,6 +61,8 @@ public class PrenotazioniService {
     }
 
     public PrenotazioneDTO creaPrenotazione(PrenotazioneRequestDTO request, Jwt jwt) {
+        validaOrariPrenotazione(request.getStart(), request.getEnd());
+        
         var event = buildEvent(request);
 
         var createdEvent = graphClient.users()
@@ -70,6 +75,8 @@ public class PrenotazioniService {
     }
 
     public PrenotazioneDTO modificaPrenotazione(String eventId, PrenotazioneRequestDTO request, Jwt jwt) {
+        validaOrariPrenotazione(request.getStart(), request.getEnd());
+        
         var event = buildEvent(request);
 
         var updatedEvent = graphClient.users()
@@ -150,16 +157,47 @@ public class PrenotazioniService {
 
         return PrenotazioneDTO.builder()
                 .id(event.getId())
+                .salaId(salaEmail != null ? salaEmail.trim().toLowerCase() : null)
                 .salaEmail(salaEmail)
                 .titolo(event.getSubject())
                 .descrizione(event.getBody() != null ? event.getBody().getContent() : null)
-                .start(event.getStart() != null ? event.getStart().getDateTime() : null)
-                .end(event.getEnd() != null ? event.getEnd().getDateTime() : null)
+                .start(event.getStart() != null ? normalizzaData(event.getStart().getDateTime()) : null)
+                .end(event.getEnd() != null ? normalizzaData(event.getEnd().getDateTime()) : null)
+                
                 .organizzatoreNome(event.getOrganizer() != null
                         && event.getOrganizer().getEmailAddress() != null
                         ? event.getOrganizer().getEmailAddress().getName()
                         : null)
                 .modificabile(modificabile)
                 .build();
+    }
+    
+    private String normalizzaData(String dateTime) {
+        if (dateTime == null) return null;
+        return dateTime.endsWith("Z") ? dateTime : dateTime + "Z";
+    }
+    
+    private void validaOrariPrenotazione(String startStr, String endStr) {
+        try {
+            LocalDateTime start = LocalDateTime.parse(startStr);
+            LocalDateTime end = LocalDateTime.parse(endStr);
+
+            // 1. La fine non può essere prima (o uguale) all'inizio
+            if (end.isBefore(start) || end.isEqual(start)) {
+                throw new IllegalArgumentException("Errore: l'orario di fine deve essere successivo all'orario di inizio.");
+            }
+
+            // 2. Controllo fascia lavorativa (08:00 - 20:00)
+            LocalTime startTime = start.toLocalTime();
+            LocalTime endTime = end.toLocalTime();
+            LocalTime minTime = LocalTime.of(8, 0);
+            LocalTime maxTime = LocalTime.of(20, 0);
+
+            if (startTime.isBefore(minTime) || endTime.isAfter(maxTime)) {
+                throw new IllegalArgumentException("Errore: le prenotazioni sono consentite solo nella fascia oraria 08:00 - 20:00.");
+            }
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("Errore: Formato data/ora non valido. Usa il formato ISO-8601.");
+        }
     }
 }
