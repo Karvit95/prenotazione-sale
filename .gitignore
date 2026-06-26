@@ -31,3 +31,4 @@ target/
 .settings/
 .classpath
 .project
+/frontend-sale
