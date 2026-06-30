@@ -7,6 +7,7 @@ import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
 import it.szn.prenotazionesale.model.SalaDTO;
 import lombok.AllArgsConstructor;
 
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
 
@@ -47,7 +48,7 @@ public class PrenotazioniService {
     public List<PrenotazioneDTO> getPrenotazioniTutteSale(String dataInizio, String dataFine, Jwt jwt) {
         List<SalaDTO> tutteLeSale = saleService.getSale(); 
 
-        return tutteLeSale.parallelStream()
+        return tutteLeSale.stream()  // <-- CAMBIATO: parallelStream() → stream()
                 .<PrenotazioneDTO>flatMap(sala -> {
                     try {
                         List<PrenotazioneDTO> lista = getPrenotazioni(sala.getEmail(), dataInizio, dataFine, jwt);
@@ -61,8 +62,13 @@ public class PrenotazioniService {
     }
 
     public PrenotazioneDTO creaPrenotazione(PrenotazioneRequestDTO request, Jwt jwt) {
+<<<<<<< Updated upstream
         validaOrariPrenotazione(request.getStart(), request.getEnd());
         
+=======
+        verificaAdmin(jwt);  // <-- AGGIUNTO: solo admin può creare
+
+>>>>>>> Stashed changes
         var event = buildEvent(request);
 
         var createdEvent = graphClient.users()
@@ -75,8 +81,13 @@ public class PrenotazioniService {
     }
 
     public PrenotazioneDTO modificaPrenotazione(String eventId, PrenotazioneRequestDTO request, Jwt jwt) {
+<<<<<<< Updated upstream
         validaOrariPrenotazione(request.getStart(), request.getEnd());
         
+=======
+        verificaAdmin(jwt);  // <-- AGGIUNTO: solo admin può modificare
+
+>>>>>>> Stashed changes
         var event = buildEvent(request);
 
         var updatedEvent = graphClient.users()
@@ -89,26 +100,7 @@ public class PrenotazioniService {
     }
 
     public void cancellaPrenotazione(String eventId, String salaEmail, Jwt jwt) {
-        var event = graphClient.users()
-                .byUserId(salaEmail)
-                .events()
-                .byEventId(eventId)
-                .get();
-
-        List<String> ruoli = jwt.getClaimAsStringList("roles");
-        boolean isAdmin = ruoli != null && ruoli.contains("RoomBooking.Admin");
-        String organizzatoreNome = event.getOrganizer() != null
-                && event.getOrganizer().getEmailAddress() != null
-                ? event.getOrganizer().getEmailAddress().getName()
-                : null;
-        boolean isOrganizzatore = organizzatoreNome != null
-                && organizzatoreNome.equals(jwt.getSubject());
-
-        if (!isAdmin && !isOrganizzatore) {
-            throw new org.springframework.security.access.AccessDeniedException(
-                    "Non hai i permessi per cancellare questa prenotazione"
-            );
-        }
+        verificaAdmin(jwt);  // <-- CAMBIATO: solo admin, rimosso controllo organizzatore rotto
 
         graphClient.users()
                 .byUserId(salaEmail)
@@ -144,21 +136,13 @@ public class PrenotazioniService {
     }
 
     private PrenotazioneDTO mapToDTO(Event event, String salaEmail, Jwt jwt) {
-        String organizzatoreId = event.getOrganizer() != null
-                && event.getOrganizer().getEmailAddress() != null
-                ? event.getOrganizer().getEmailAddress().getName()
-                : null;
-
-        String utenteCorrenteId = jwt.getSubject();
-        List<String> ruoli = jwt.getClaimAsStringList("roles");
-        boolean isAdmin = ruoli != null && ruoli.contains("RoomBooking.Admin");
-        boolean modificabile = isAdmin || 
-                (organizzatoreId != null && organizzatoreId.equals(utenteCorrenteId));
+        boolean isAdmin = isAdmin(jwt);  // <-- SEMPLIFICATO
 
         return PrenotazioneDTO.builder()
                 .id(event.getId())
                 .salaId(salaEmail != null ? salaEmail.trim().toLowerCase() : null)
                 .salaEmail(salaEmail)
+                .salaId(salaEmail)  // <-- AGGIUNTO: popolato con l'email della sala
                 .titolo(event.getSubject())
                 .descrizione(event.getBody() != null ? event.getBody().getContent() : null)
                 .start(event.getStart() != null ? normalizzaData(event.getStart().getDateTime()) : null)
@@ -168,9 +152,10 @@ public class PrenotazioniService {
                         && event.getOrganizer().getEmailAddress() != null
                         ? event.getOrganizer().getEmailAddress().getName()
                         : null)
-                .modificabile(modificabile)
+                .modificabile(isAdmin)  // <-- CAMBIATO: solo admin può modificare
                 .build();
     }
+<<<<<<< Updated upstream
     
     private String normalizzaData(String dateTime) {
         if (dateTime == null) return null;
@@ -200,4 +185,19 @@ public class PrenotazioniService {
             throw new IllegalArgumentException("Errore: Formato data/ora non valido. Usa il formato ISO-8601.");
         }
     }
+=======
+
+    // --- Metodi helper per permessi ---
+
+    private void verificaAdmin(Jwt jwt) {
+        if (!isAdmin(jwt)) {
+            throw new AccessDeniedException("Solo gli admin possono eseguire questa operazione");
+        }
+    }
+
+    private boolean isAdmin(Jwt jwt) {
+        List<String> ruoli = jwt.getClaimAsStringList("roles");
+        return ruoli != null && ruoli.contains("RoomBooking.Admin");
+    }
+>>>>>>> Stashed changes
 }
