@@ -3,6 +3,7 @@ package it.szn.prenotazionesale.controller;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
 import it.szn.prenotazionesale.service.PrenotazioniService;
+import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 
 import org.springframework.http.ResponseEntity;
@@ -51,7 +52,7 @@ public class PrenotazioniController {
     // POST /api/prenotazioni
     @PostMapping
     public ResponseEntity<PrenotazioneDTO> creaPrenotazione(
-            @RequestBody PrenotazioneRequestDTO request,
+            @Valid @RequestBody PrenotazioneRequestDTO request,
             @AuthenticationPrincipal Jwt jwt) {
         log.info("POST /api/prenotazioni - sala: {}, titolo: {}", request.getSalaEmail(), request.getTitolo());
         var result = prenotazioniService.creaPrenotazione(request, jwt);
@@ -63,7 +64,7 @@ public class PrenotazioniController {
     @PatchMapping("/{eventId}")
     public ResponseEntity<PrenotazioneDTO> modificaPrenotazione(
             @PathVariable String eventId,
-            @RequestBody PrenotazioneRequestDTO request,
+            @Valid @RequestBody PrenotazioneRequestDTO request,
             @AuthenticationPrincipal Jwt jwt) {
         log.info("PATCH /api/prenotazioni/{} - sala: {}", eventId, request.getSalaEmail());
         var result = prenotazioniService.modificaPrenotazione(eventId, request, jwt);
