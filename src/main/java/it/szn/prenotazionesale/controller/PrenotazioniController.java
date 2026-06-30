@@ -3,6 +3,8 @@ package it.szn.prenotazionesale.controller;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
 import it.szn.prenotazionesale.service.PrenotazioniService;
+import lombok.extern.slf4j.Slf4j;
+
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -10,6 +12,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/prenotazioni")
 public class PrenotazioniController {
@@ -27,9 +30,10 @@ public class PrenotazioniController {
             @RequestParam String dataInizio,
             @RequestParam String dataFine,
             @AuthenticationPrincipal Jwt jwt) {
-        return ResponseEntity.ok(
-                prenotazioniService.getPrenotazioni(salaEmail, dataInizio, dataFine, jwt)
-        );
+        log.info("GET /api/prenotazioni - sala: {}, dal: {}, al: {}", salaEmail, dataInizio, dataFine);
+        var result = prenotazioniService.getPrenotazioni(salaEmail, dataInizio, dataFine, jwt);
+        log.debug("GET /api/prenotazioni - restituite {} prenotazioni", result.size());
+        return ResponseEntity.ok(result);
     }
     
     // GET /api/prenotazioni/tutte?dataInizio=...&dataFine=...
@@ -38,8 +42,9 @@ public class PrenotazioniController {
             @RequestParam String dataInizio,
             @RequestParam String dataFine,
             @AuthenticationPrincipal Jwt jwt) {
-
+        log.info("GET /api/prenotazioni/tutte - dal: {}, al: {}", dataInizio, dataFine);
         List<PrenotazioneDTO> prenotazioni = prenotazioniService.getPrenotazioniTutteSale(dataInizio, dataFine, jwt);
+        log.debug("GET /api/prenotazioni/tutte - restituite {} prenotazioni", prenotazioni.size());
         return ResponseEntity.ok(prenotazioni);
     }
 
@@ -48,9 +53,10 @@ public class PrenotazioniController {
     public ResponseEntity<PrenotazioneDTO> creaPrenotazione(
             @RequestBody PrenotazioneRequestDTO request,
             @AuthenticationPrincipal Jwt jwt) {
-        return ResponseEntity.ok(
-                prenotazioniService.creaPrenotazione(request, jwt)
-        );
+        log.info("POST /api/prenotazioni - sala: {}, titolo: {}", request.getSalaEmail(), request.getTitolo());
+        var result = prenotazioniService.creaPrenotazione(request, jwt);
+        log.info("POST /api/prenotazioni - creata con ID {}", result.getId());
+        return ResponseEntity.ok(result);
     }
 
     // PATCH /api/prenotazioni/{eventId}?salaEmail=...
@@ -59,11 +65,10 @@ public class PrenotazioniController {
             @PathVariable String eventId,
             @RequestBody PrenotazioneRequestDTO request,
             @AuthenticationPrincipal Jwt jwt) {
-
-        // Verifica che l'utente possa modificare - il service lo controlla
-        return ResponseEntity.ok(
-                prenotazioniService.modificaPrenotazione(eventId, request, jwt)
-        );
+        log.info("PATCH /api/prenotazioni/{} - sala: {}", eventId, request.getSalaEmail());
+        var result = prenotazioniService.modificaPrenotazione(eventId, request, jwt);
+        log.info("PATCH /api/prenotazioni/{} - modificata con successo", eventId);
+        return ResponseEntity.ok(result);
     }
 
     // DELETE /api/prenotazioni/{eventId}?salaEmail=...
@@ -72,9 +77,9 @@ public class PrenotazioniController {
             @PathVariable String eventId,
             @RequestParam String salaEmail,
             @AuthenticationPrincipal Jwt jwt) {
-
-        // Verifica permessi prima di cancellare
+        log.info("DELETE /api/prenotazioni/{} - sala: {}", eventId, salaEmail);
         prenotazioniService.cancellaPrenotazione(eventId, salaEmail, jwt);
+        log.info("DELETE /api/prenotazioni/{} - cancellata con successo", eventId);
         return ResponseEntity.noContent().build();
     }
 }
