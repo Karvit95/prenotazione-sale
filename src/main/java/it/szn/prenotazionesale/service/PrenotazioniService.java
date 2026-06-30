@@ -62,15 +62,10 @@ public class PrenotazioniService {
     }
 
     public PrenotazioneDTO creaPrenotazione(PrenotazioneRequestDTO request, Jwt jwt) {
-<<<<<<< Updated upstream
         validaOrariPrenotazione(request.getStart(), request.getEnd());
-        
-=======
-        verificaAdmin(jwt);  // <-- AGGIUNTO: solo admin può creare
+        verificaAdmin(jwt);  // 
 
->>>>>>> Stashed changes
         var event = buildEvent(request);
-
         var createdEvent = graphClient.users()
                 .byUserId(request.getSalaEmail())
                 .calendar()
@@ -81,13 +76,8 @@ public class PrenotazioniService {
     }
 
     public PrenotazioneDTO modificaPrenotazione(String eventId, PrenotazioneRequestDTO request, Jwt jwt) {
-<<<<<<< Updated upstream
         validaOrariPrenotazione(request.getStart(), request.getEnd());
-        
-=======
-        verificaAdmin(jwt);  // <-- AGGIUNTO: solo admin può modificare
-
->>>>>>> Stashed changes
+        verificaAdmin(jwt);
         var event = buildEvent(request);
 
         var updatedEvent = graphClient.users()
@@ -142,7 +132,6 @@ public class PrenotazioniService {
                 .id(event.getId())
                 .salaId(salaEmail != null ? salaEmail.trim().toLowerCase() : null)
                 .salaEmail(salaEmail)
-                .salaId(salaEmail)  // <-- AGGIUNTO: popolato con l'email della sala
                 .titolo(event.getSubject())
                 .descrizione(event.getBody() != null ? event.getBody().getContent() : null)
                 .start(event.getStart() != null ? normalizzaData(event.getStart().getDateTime()) : null)
@@ -152,10 +141,9 @@ public class PrenotazioniService {
                         && event.getOrganizer().getEmailAddress() != null
                         ? event.getOrganizer().getEmailAddress().getName()
                         : null)
-                .modificabile(isAdmin)  // <-- CAMBIATO: solo admin può modificare
+                .modificabile(isAdmin)  
                 .build();
     }
-<<<<<<< Updated upstream
     
     private String normalizzaData(String dateTime) {
         if (dateTime == null) return null;
@@ -185,7 +173,6 @@ public class PrenotazioniService {
             throw new IllegalArgumentException("Errore: Formato data/ora non valido. Usa il formato ISO-8601.");
         }
     }
-=======
 
     // --- Metodi helper per permessi ---
 
@@ -199,5 +186,4 @@ public class PrenotazioniService {
         List<String> ruoli = jwt.getClaimAsStringList("roles");
         return ruoli != null && ruoli.contains("RoomBooking.Admin");
     }
->>>>>>> Stashed changes
 }
