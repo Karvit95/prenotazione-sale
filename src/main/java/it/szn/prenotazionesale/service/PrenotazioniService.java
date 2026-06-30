@@ -92,6 +92,16 @@ public class PrenotazioniService {
         verificaAdmin(jwt);
         validaOrariPrenotazione(request.getStart(), request.getEnd());
         
+        String salaOriginale = request.getSalaEmailOriginale();
+        
+        // Se la sala è cambiata, cancella dalla vecchia e crea sulla nuova
+        if (salaOriginale != null && !salaOriginale.equals(request.getSalaEmail())) {
+            log.info("Sala cambiata da {} a {}: cancello e ricreo l'evento", salaOriginale, request.getSalaEmail());
+            cancellaPrenotazione(eventId, salaOriginale, jwt);
+            return creaPrenotazione(request, jwt);
+        }
+        
+        // Sala invariata → PATCH normale
         var event = buildEvent(request);
         var updatedEvent = graphClient.users()
                 .byUserId(request.getSalaEmail())

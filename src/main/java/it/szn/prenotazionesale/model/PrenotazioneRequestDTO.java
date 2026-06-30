@@ -11,10 +11,11 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class PrenotazioneRequestDTO {
 
-	private String salaEmail; // Email della room da prenotare
-	private String titolo; // Oggetto della riunione
-	private String descrizione; // Opzionale
-	private String start; // ISO 8601
-	private String end; // ISO 8601
+	private String salaEmail; 
+	private String titolo; 
+	private String descrizione;
+	private String start;
+	private String end; 
+	private String salaEmailOriginale;
 
 }
