@@ -32,3 +32,4 @@ target/
 .classpath
 .project
 /frontend-sale
+/target/classes
