@@ -33,3 +33,4 @@ target/
 .project
 /frontend-sale
 /target/classes
+.factorypath
