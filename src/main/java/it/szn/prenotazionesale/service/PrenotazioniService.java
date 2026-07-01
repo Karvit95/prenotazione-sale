@@ -13,9 +13,6 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
-import java.time.LocalTime;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.List;
@@ -67,7 +64,7 @@ public class PrenotazioniService {
 		log.info("Richiesta prenotazioni per tutte le sale dal {} al {}", dataInizio, dataFine);
 		List<SalaDTO> tutteLeSale = saleService.getSale();
 
-		return tutteLeSale.stream().<PrenotazioneDTO>flatMap(sala -> {
+		return tutteLeSale.parallelStream().<PrenotazioneDTO>flatMap(sala -> {
 			try {
 				List<PrenotazioneDTO> lista = getPrenotazioni(sala.getEmail(), dataInizio, dataFine, jwt);
 				return lista.stream();
