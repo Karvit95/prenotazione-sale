@@ -44,6 +44,16 @@ public class GlobalExceptionHandler {
                 .status(HttpStatus.BAD_REQUEST)
                 .body(ErrorResponse.of(HttpStatus.BAD_REQUEST.value(), ex.getMessage()));
     }
+    
+    // Stati di inconsistenza che richiedono intervento manuale
+    // (es. cambio sala riuscito solo a metà: nuovo evento creato, vecchio non cancellabile)
+    @ExceptionHandler(IllegalStateException.class)
+    public ResponseEntity<ErrorResponse> handleIllegalState(IllegalStateException ex){
+    	log.error("Stato inconsistente: {}", ex.getMessage());
+    	return ResponseEntity
+    			.status(HttpStatus.CONFLICT)
+    			.body(ErrorResponse.of(HttpStatus.CONFLICT.value(), ex.getMessage()));
+    }
 
     // Operazioni riservate (es. solo admin) tentate da utenti senza permesso
     @ExceptionHandler(AccessDeniedException.class)

@@ -97,9 +97,18 @@ public class PrenotazioniService {
         
         // Se la sala è cambiata, cancella dalla vecchia e crea sulla nuova
         if (salaOriginale != null && !salaOriginale.equals(request.getSalaEmail())) {
-            log.info("Sala cambiata da {} a {}: cancello e ricreo l'evento", salaOriginale, request.getSalaEmail());
-            cancellaPrenotazione(eventId, salaOriginale, jwt);
-            return creaPrenotazione(request, jwt);
+            log.info("Sala cambiata da {} a {}: creo il nuovo evento prima di cancellare il vecchio", salaOriginale, request.getSalaEmail());
+            
+            PrenotazioneDTO nuovaPrenotazione = creaPrenotazione(request, jwt);
+            
+            try {
+            	cancellaPrenotazione(eventId, salaOriginale, jwt);
+            } catch (Exception e) {
+            	log.error("Prenotazione spostata con ID nuovo {} ma impossibile cancellare l'evento originale {} sulla sala {}: rimane una prenotazione duplicata da rimuovere manualmente", nuovaPrenotazione.getId(), eventId, salaOriginale, e);
+            	throw new IllegalStateException("La prenotazione è stata creata sulla nuova sala (ID " + nuovaPrenotazione.getId() + "), ma non è stato possibile rimuovere quella originale sulla sala precedente (ID " + eventId + "). Contatta l'amministratore IT per la cancellazione manuale della vecchia prenotazione.", e);
+            }
+            
+            return nuovaPrenotazione;
         }
         
         verificaDisponibilita(request.getSalaEmail(), request.getStart(), request.getEnd(), eventId, jwt);
