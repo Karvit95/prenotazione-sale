@@ -56,6 +56,7 @@ public class PrenotazioniService {
                 .get(req -> {
                     req.queryParameters.filter = filter;
                     req.queryParameters.top = 500;
+                    req.headers.add("prefer", "outlook.timezone=\"Europe/Rome\"");
                 })
                 .getValue();
 
@@ -168,7 +169,8 @@ public class PrenotazioniService {
             .byEventId(eventId)
             .delete();
 
-    log.info("Prenotazione {} cancellata con successo", eventId);
+        	log.info("Prenotazione {} cancellata con successo", eventId);
+        	
         } finally {
         	lock.unlock();
         }
@@ -212,35 +214,14 @@ public class PrenotazioniService {
                 .salaEmail(salaEmail)
                 .titolo(event.getSubject())
                 .descrizione(event.getBody() != null ? event.getBody().getContent() : null)
-                .start(event.getStart() != null ? convertiInEuropeRome(event.getStart()) : null)
-                .end(event.getEnd() != null ? convertiInEuropeRome(event.getEnd()) : null)
-                
+                .start(event.getStart() != null ? event.getStart().getDateTime() : null)
+                .end(event.getEnd() != null ? event.getEnd().getDateTime() : null)
                 .organizzatoreNome(event.getOrganizer() != null
                         && event.getOrganizer().getEmailAddress() != null
                         ? event.getOrganizer().getEmailAddress().getName()
                         : null)
                 .modificabile(isAdmin)  
                 .build();
-    }
-    
-    private String convertiInEuropeRome(DateTimeTimeZone dtz) {
-        if (dtz == null || dtz.getDateTime() == null) return null;
-        
-        String dateTime = dtz.getDateTime();
-        String timeZone = dtz.getTimeZone();
-        
-        // Se la data ha già un offset esplicito (+HH:MM) o Z, parsiamo direttamente
-        if (dateTime.endsWith("Z") || dateTime.matches(".*[+-]\\d{2}:\\d{2}$")) {
-            ZonedDateTime zdt = ZonedDateTime.parse(dateTime);
-            return zdt.withZoneSameInstant(ZoneId.of("Europe/Rome"))
-                      .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME);
-        }
-        
-        // Altrimenti usa il timezone specificato da Graph (default UTC se null)
-        ZoneId zoneId = timeZone != null ? ZoneId.of(timeZone) : ZoneId.of("UTC");
-        ZonedDateTime zdt = LocalDateTime.parse(dateTime).atZone(zoneId);
-        return zdt.withZoneSameInstant(ZoneId.of("Europe/Rome"))
-                  .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME);
     }
     
     private void validaOrariPrenotazione(String startStr, String endStr) {
