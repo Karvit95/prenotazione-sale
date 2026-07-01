@@ -74,7 +74,8 @@ public class PrenotazioniService {
     public PrenotazioneDTO creaPrenotazione(PrenotazioneRequestDTO request, Jwt jwt) {
         log.info("Creazione prenotazione per sala {} - titolo: {}", request.getSalaEmail(), request.getTitolo());
         verificaAdmin(jwt);
-        validaOrariPrenotazione(request.getStart(), request.getEnd());  
+        validaOrariPrenotazione(request.getStart(), request.getEnd()); 
+        verificaDisponibilita(request.getSalaEmail(), request.getStart(), request.getEnd(), null, jwt);
 
         var event = buildEvent(request);
         var createdEvent = graphClient.users()
@@ -100,6 +101,8 @@ public class PrenotazioniService {
             cancellaPrenotazione(eventId, salaOriginale, jwt);
             return creaPrenotazione(request, jwt);
         }
+        
+        verificaDisponibilita(request.getSalaEmail(), request.getStart(), request.getEnd(), eventId, jwt);
         
         // Sala invariata → PATCH normale
         var event = buildEvent(request);
@@ -217,6 +220,36 @@ public class PrenotazioniService {
         } catch (DateTimeParseException e) {
             log.warn("Validazione fallita: formato data non valido: start={}, end={}", startStr, endStr);
             throw new IllegalArgumentException("Errore: Formato data/ora non valido. Usa il formato ISO-8601.");
+        }
+    }
+    
+    private void verificaDisponibilita(String salaEmail, String startStr, String endStr, String eventIdDaEscludere, Jwt jwt) {
+        log.debug("Verifica disponibilità sala {} dal {} al {} (esclude eventId={})",
+                salaEmail, startStr, endStr, eventIdDaEscludere);
+
+        LocalDateTime nuovoStart = LocalDateTime.parse(startStr);
+        LocalDateTime nuovoEnd = LocalDateTime.parse(endStr);
+
+        // Recuperiamo gli eventi del giorno interessato (margine ampio per coprire eventi a cavallo)
+        DateTimeFormatter formatoFiltro = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+        String filtroInizio = nuovoStart.toLocalDate().atStartOfDay().format(formatoFiltro);
+        String filtroFine = nuovoStart.toLocalDate().plusDays(1).atStartOfDay().format(formatoFiltro);
+
+        List<PrenotazioneDTO> eventiEsistenti = getPrenotazioni(salaEmail, filtroInizio, filtroFine, jwt);
+
+        boolean conflitto = eventiEsistenti.stream()
+                .filter(e -> eventIdDaEscludere == null || !e.getId().equals(eventIdDaEscludere))
+                .anyMatch(e -> {
+                    if (e.getStart() == null || e.getEnd() == null) return false;
+                    LocalDateTime esistenteStart = LocalDateTime.parse(e.getStart());
+                    LocalDateTime esistenteEnd = LocalDateTime.parse(e.getEnd());
+                    // Overlap se: inizio esistente prima della fine nuova E fine esistente dopo l'inizio nuovo
+                    return esistenteStart.isBefore(nuovoEnd) && esistenteEnd.isAfter(nuovoStart);
+                });
+
+        if (conflitto) {
+            log.warn("Conflitto rilevato: sala {} già occupata dal {} al {}", salaEmail, startStr, endStr);
+            throw new IllegalArgumentException("Errore: la sala è già occupata nella fascia oraria selezionata.");
         }
     }
 
