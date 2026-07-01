@@ -19,6 +19,8 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -29,6 +31,16 @@ public class PrenotazioniService {
 
     private final GraphServiceClient graphClient;
     private final SaleService saleService;
+    
+    // Un lock per sala: serializza il blocco "verifica disponibilità + scrittura evento"
+    // così due richieste concorrenti sulla stessa sala non possono superare entrambe il
+    // controllo di disponibilità e creare eventi sovrapposti (TOCTOU / race condition).
+    //
+    // NB: funziona solo con una singola istanza dell'applicazione in esecuzione (il lock
+    // vive in memoria, non è condiviso tra più repliche). Va bene per il deployment attuale
+    // a singola istanza; se in futuro si passa a più repliche, questo lock non basta più
+    // e serve un lock distribuito (es. su un DB condiviso).
+    private final ConcurrentHashMap<String, ReentrantLock> lockPerSala = new ConcurrentHashMap<>();
 
     public List<PrenotazioneDTO> getPrenotazioni(String salaEmail, String dataInizio, String dataFine, Jwt jwt) {
         log.info("Richiesta prenotazioni per sala {} dal {} al {}", salaEmail, dataInizio, dataFine);
@@ -75,17 +87,24 @@ public class PrenotazioniService {
         log.info("Creazione prenotazione per sala {} - titolo: {}", request.getSalaEmail(), request.getTitolo());
         verificaAdmin(jwt);
         validaOrariPrenotazione(request.getStart(), request.getEnd()); 
-        verificaDisponibilita(request.getSalaEmail(), request.getStart(), request.getEnd(), null, jwt);
+        
+        ReentrantLock lock = getLockPerSala(request.getSalaEmail());
+        lock.lock();
 
-        var event = buildEvent(request);
-        var createdEvent = graphClient.users()
-                .byUserId(request.getSalaEmail())
-                .calendar()
-                .events()
-                .post(event);
+        try {
+        	verificaDisponibilita(request.getSalaEmail(), request.getStart(), request.getEnd(), null, jwt);
+        	 var event = buildEvent(request);
+             var createdEvent = graphClient.users()
+                     .byUserId(request.getSalaEmail())
+                     .calendar()
+                     .events()
+                     .post(event);
 
-        log.info("Prenotazione creata con ID {}", createdEvent.getId());
-        return mapToDTO(createdEvent, request.getSalaEmail(), jwt);
+             log.info("Prenotazione creata con ID {}", createdEvent.getId());
+             return mapToDTO(createdEvent, request.getSalaEmail(), jwt);
+        }finally {
+        	lock.unlock();
+        }
     }
 
     public PrenotazioneDTO modificaPrenotazione(String eventId, PrenotazioneRequestDTO request, Jwt jwt) {
@@ -111,18 +130,28 @@ public class PrenotazioniService {
             return nuovaPrenotazione;
         }
         
-        verificaDisponibilita(request.getSalaEmail(), request.getStart(), request.getEnd(), eventId, jwt);
+        ReentrantLock lock = getLockPerSala(request.getSalaEmail());
+        lock.lock();
         
-        // Sala invariata → PATCH normale
-        var event = buildEvent(request);
-        var updatedEvent = graphClient.users()
-                .byUserId(request.getSalaEmail())
-                .events()
-                .byEventId(eventId)
-                .patch(event);
+        try {
+        	verificaDisponibilita(request.getSalaEmail(), request.getStart(), request.getEnd(), eventId, jwt);
+        	
+        	// Sala invariata → PATCH normale
+            var event = buildEvent(request);
+            var updatedEvent = graphClient.users()
+                    .byUserId(request.getSalaEmail())
+                    .events()
+                    .byEventId(eventId)
+                    .patch(event);
 
-        log.info("Prenotazione {} modificata con successo", eventId);
-        return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
+            log.info("Prenotazione {} modificata con successo", eventId);
+            return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
+            
+        }finally {
+        	
+        	lock.unlock();
+        	
+        }
     }
 
     public void cancellaPrenotazione(String eventId, String salaEmail, Jwt jwt) {
@@ -274,5 +303,10 @@ public class PrenotazioniService {
     private boolean isAdmin(Jwt jwt) {
         List<String> ruoli = jwt.getClaimAsStringList("roles");
         return ruoli != null && ruoli.contains("RoomBooking.Admin");
+    }
+    
+    private ReentrantLock getLockPerSala(String salaEmail) {
+        String chiave = salaEmail.trim().toLowerCase();
+        return lockPerSala.computeIfAbsent(chiave, k -> new ReentrantLock());
     }
 }
