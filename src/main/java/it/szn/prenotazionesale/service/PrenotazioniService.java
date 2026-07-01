@@ -158,13 +158,22 @@ public class PrenotazioniService {
         log.info("Cancellazione prenotazione ID {} per sala {}", eventId, salaEmail);
         verificaAdmin(jwt);
 
-        graphClient.users()
-                .byUserId(salaEmail)
-                .events()
-                .byEventId(eventId)
-                .delete();
+        ReentrantLock lock = getLockPerSala(salaEmail);
+        lock.lock();
+        
+        try {
+        	graphClient.users()
+            .byUserId(salaEmail)
+            .events()
+            .byEventId(eventId)
+            .delete();
 
-        log.info("Prenotazione {} cancellata con successo", eventId);
+    log.info("Prenotazione {} cancellata con successo", eventId);
+        } finally {
+        	lock.unlock();
+        }
+        
+        
     }
 
     // --- Metodi privati ---
