@@ -22,4 +22,14 @@ public class PrenotazioneDTO {
     private String organizzatoreNome; // Display name dell'organizzatore
     private boolean modificabile;   // true se l'utente loggato può modificare
 
+    // --- Campi per ricorrenza ---
+
+    /** ID della serie master (null se evento singolo) */
+    private String seriesMasterId;
+
+    /** true se l'evento fa parte di una serie ricorrente */
+    private boolean ricorrente;
+
+    /** "daily" | "weekly" | "monthly" | "yearly" — per visualizzazione */
+    private String pattern;
 }

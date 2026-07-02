@@ -6,6 +6,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
+
 @Data
 @Builder
 @NoArgsConstructor
@@ -27,4 +29,21 @@ public class PrenotazioneRequestDTO {
     private String end;
 
     private String salaEmailOriginale;
+
+    // --- Campi per ricorrenza ---
+
+    /** "daily" | "weekly" | "monthly" | "yearly" — null se evento singolo */
+    private String pattern;
+
+    /** Ogni N giorni/settimane/mesi (default: 1) */
+    private Integer intervallo;
+
+    /** Solo per weekly: ["Monday","Wednesday",...] */
+    private List<String> giorniSettimana;
+
+    /** Data fine ricorrenza in formato ISO (obbligatoria se pattern != null) */
+    private String dataFine;
+
+    /** "SINGOLA" | "SERIE" — per PATCH/DELETE su eventi ricorrenti */
+    private String tipoModifica;
 }

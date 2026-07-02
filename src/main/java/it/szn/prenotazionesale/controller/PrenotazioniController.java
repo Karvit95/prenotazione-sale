@@ -72,14 +72,15 @@ public class PrenotazioniController {
         return ResponseEntity.ok(result);
     }
 
-    // DELETE /api/prenotazioni/{eventId}?salaEmail=...
+    // DELETE /api/prenotazioni/{eventId}?salaEmail=...&tipoCancellazione=SERIE
     @DeleteMapping("/{eventId}")
     public ResponseEntity<Void> cancellaPrenotazione(
             @PathVariable String eventId,
             @RequestParam String salaEmail,
+            @RequestParam(defaultValue = "SERIE") String tipoCancellazione,
             @AuthenticationPrincipal Jwt jwt) {
-        log.info("DELETE /api/prenotazioni/{} - sala: {}", eventId, salaEmail);
-        prenotazioniService.cancellaPrenotazione(eventId, salaEmail, jwt);
+        log.info("DELETE /api/prenotazioni/{} - sala: {}, tipo: {}", eventId, salaEmail, tipoCancellazione);
+        prenotazioniService.cancellaPrenotazione(eventId, salaEmail, tipoCancellazione, jwt);
         log.info("DELETE /api/prenotazioni/{} - cancellata con successo", eventId);
         return ResponseEntity.noContent().build();
     }

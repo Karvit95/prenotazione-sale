@@ -13,6 +13,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
@@ -83,12 +84,14 @@ public class PrenotazioniService {
 		validaParametroFiltroData(dataInizio, "dataInizio");
 		validaParametroFiltroData(dataFine, "dataFine");
 
-		String filter = String.format("start/dateTime ge '%s' and end/dateTime le '%s'", dataInizio, dataFine);
-
-		var events = graphClient.users().byUserId(salaEmail).calendar().events().get(req -> {
-			req.queryParameters.filter = filter;
-			req.queryParameters.top = 500;
-			req.headers.add("prefer", "outlook.timezone=\"Europe/Rome\"");
+		// Usiamo calendarView invece di calendar/events perché calendarView
+		// espande automaticamente le occorrenze degli eventi ricorrenti nel
+		// periodo richiesto. Con calendar/events riceviamo solo l'evento master
+		// (la prima occorrenza), non tutte le istanze della serie.
+		var events = graphClient.users().byUserId(salaEmail).calendarView().get(req -> {
+			req.queryParameters.startDateTime = dataInizio;
+			req.queryParameters.endDateTime = dataFine;
+			req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
 		}).getValue();
 
 		log.debug("Trovati {} eventi per la sala {}", events.size(), salaEmail);
@@ -122,6 +125,11 @@ public class PrenotazioniService {
 		log.info("Creazione prenotazione per sala {} - titolo: {}", request.getSalaEmail(), request.getTitolo());
 		verificaAdmin(jwt);
 		validaOrariPrenotazione(request.getStart(), request.getEnd());
+
+		// Se ricorrente, valida anche i campi specifici
+		if (request.getPattern() != null) {
+			validaRicorrenza(request);
+		}
 
 		ReentrantLock lock = getLockPerSala(request.getSalaEmail());
 		lock.lock();
@@ -174,13 +182,45 @@ public class PrenotazioniService {
 		try {
 			verificaDisponibilita(request.getSalaEmail(), request.getStart(), request.getEnd(), eventId, jwt);
 
-			// Sala invariata → PATCH normale
-			var event = buildEvent(request);
-			var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events().byEventId(eventId)
-					.patch(event);
+			// Determina se modificare la singola occorrenza o l'intera serie
+			String tipoModifica = request.getTipoModifica();
+			boolean modificaSerie = "SERIE".equals(tipoModifica);
 
-			log.info("Prenotazione {} modificata con successo", eventId);
-			return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
+			if (modificaSerie) {
+				// PATCH sul series master
+				var event = buildEvent(request);
+				var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events().byEventId(eventId)
+						.patch(event);
+				log.info("Prenotazione (serie) {} modificata con successo", eventId);
+				return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
+			} else {
+				// PATCH sulla singola occorrenza: costruiamo un corpo che aggiorni solo
+				// i campi base (start/end/titolo/descrizione) SENZA la ricorrenza
+				var event = new Event();
+				event.setSubject(request.getTitolo());
+
+				if (request.getDescrizione() != null) {
+					var body = new ItemBody();
+					body.setContent(request.getDescrizione());
+					body.setContentType(BodyType.Text);
+					event.setBody(body);
+				}
+
+				var start = new DateTimeTimeZone();
+				start.setDateTime(request.getStart());
+				start.setTimeZone("Europe/Rome");
+				event.setStart(start);
+
+				var end = new DateTimeTimeZone();
+				end.setDateTime(request.getEnd());
+				end.setTimeZone("Europe/Rome");
+				event.setEnd(end);
+
+				var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events().byEventId(eventId)
+						.patch(event);
+				log.info("Prenotazione (occorrenza singola) {} modificata con successo", eventId);
+				return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
+			}
 
 		} finally {
 
@@ -190,21 +230,36 @@ public class PrenotazioniService {
 	}
 
 	public void cancellaPrenotazione(String eventId, String salaEmail, Jwt jwt) {
-		log.info("Cancellazione prenotazione ID {} per sala {}", eventId, salaEmail);
+		cancellaPrenotazione(eventId, salaEmail, "SERIE", jwt);
+	}
+
+	public void cancellaPrenotazione(String eventId, String salaEmail, String tipoCancellazione, Jwt jwt) {
+		log.info("Cancellazione prenotazione ID {} per sala {} (tipo: {})", eventId, salaEmail, tipoCancellazione);
 		verificaAdmin(jwt);
 
 		ReentrantLock lock = getLockPerSala(salaEmail);
 		lock.lock();
 
 		try {
-			graphClient.users().byUserId(salaEmail).events().byEventId(eventId).delete();
+			if ("SINGOLA".equals(tipoCancellazione)) {
+				// Per cancellare una singola occorrenza di un evento ricorrente:
+				// Graph API non permette DELETE, ma bisogna fare PATCH con isCancelled=true
+				var cancelEvent = new Event();
+				cancelEvent.setIsCancelled(true);
 
-			log.info("Prenotazione {} cancellata con successo", eventId);
+				graphClient.users().byUserId(salaEmail).events().byEventId(eventId)
+						.patch(cancelEvent);
+
+				log.info("Occorrenza singola {} cancellata (isCancelled=true) sulla sala {}", eventId, salaEmail);
+			} else {
+				// Cancellazione dell'intera serie (o evento singolo)
+				graphClient.users().byUserId(salaEmail).events().byEventId(eventId).delete();
+				log.info("Prenotazione (serie) {} cancellata dalla sala {}", eventId, salaEmail);
+			}
 
 		} finally {
 			lock.unlock();
 		}
-
 	}
 
 	// --- Metodi privati ---
@@ -232,11 +287,94 @@ public class PrenotazioniService {
 		end.setTimeZone("Europe/Rome");
 		event.setEnd(end);
 
+		// Aggiungi ricorrenza se richiesta
+		if (request.getPattern() != null && !request.getPattern().isEmpty()) {
+			PatternedRecurrence recurrence = new PatternedRecurrence();
+
+			// Pattern
+			RecurrencePattern pattern = new RecurrencePattern();
+			pattern.setInterval(request.getIntervallo() != null ? request.getIntervallo() : 1);
+
+			switch (request.getPattern().toLowerCase()) {
+				case "daily":
+					pattern.setType(RecurrencePatternType.Daily);
+					break;
+				case "weekly":
+					pattern.setType(RecurrencePatternType.Weekly);
+					if (request.getGiorniSettimana() != null && !request.getGiorniSettimana().isEmpty()) {
+						pattern.setDaysOfWeek(request.getGiorniSettimana().stream()
+								.map(giorno -> DayOfWeek.forValue(giorno))
+								.collect(Collectors.toList()));
+					}
+					break;
+				case "monthly":
+					pattern.setType(RecurrencePatternType.AbsoluteMonthly);
+					break;
+				case "yearly":
+					pattern.setType(RecurrencePatternType.AbsoluteYearly);
+					break;
+				default:
+					throw new IllegalArgumentException("Tipo di ricorrenza non supportato: " + request.getPattern());
+			}
+
+			recurrence.setPattern(pattern);
+
+			// Range
+			RecurrenceRange range = new RecurrenceRange();
+			range.setType(RecurrenceRangeType.EndDate);
+
+			if (request.getDataFine() != null) {
+				String dataFineStr = request.getDataFine().length() > 10
+						? request.getDataFine().substring(0, 10)
+						: request.getDataFine();
+				range.setEndDate(LocalDate.parse(dataFineStr));
+			} else {
+				// Fallback: fine dopo 365 giorni
+				range.setNumberOfOccurrences(365);
+				range.setType(RecurrenceRangeType.Numbered);
+			}
+
+			String startDateStr = request.getStart().length() > 10
+					? request.getStart().substring(0, 10)
+					: request.getStart();
+			range.setStartDate(LocalDate.parse(startDateStr));
+
+			recurrence.setRange(range);
+
+			event.setRecurrence(recurrence);
+			log.debug("Ricorrenza aggiunta: pattern={}, intervallo={}, dataFine={}",
+					request.getPattern(), request.getIntervallo(), request.getDataFine());
+		}
+
 		return event;
 	}
 
 	private PrenotazioneDTO mapToDTO(Event event, String salaEmail, Jwt jwt) {
 		boolean isAdmin = isAdmin(jwt);
+
+		// Estrai informazioni ricorrenza
+		String seriesMasterId = null;
+		boolean ricorrente = false;
+		String pattern = null;
+
+		if (event.getSeriesMasterId() != null && !event.getSeriesMasterId().isEmpty()) {
+			seriesMasterId = event.getSeriesMasterId();
+			ricorrente = true;
+		}
+		// L'evento master stesso ha un recurrence ma non seriesMasterId
+		if (event.getRecurrence() != null && event.getRecurrence().getPattern() != null) {
+			ricorrente = true;
+			RecurrencePatternType patternType = event.getRecurrence().getPattern().getType();
+			if (patternType != null) {
+				switch (patternType) {
+					case Daily: pattern = "daily"; break;
+					case Weekly: pattern = "weekly"; break;
+					case AbsoluteMonthly: pattern = "monthly"; break;
+					case AbsoluteYearly: pattern = "yearly"; break;
+					default: pattern = patternType.toString().toLowerCase();
+				}
+			}
+		}
 
 		return PrenotazioneDTO.builder().id(event.getId())
 				.salaId(salaEmail != null ? salaEmail.trim().toLowerCase() : null).salaEmail(salaEmail)
@@ -246,7 +384,35 @@ public class PrenotazioniService {
 				.organizzatoreNome(event.getOrganizer() != null && event.getOrganizer().getEmailAddress() != null
 						? event.getOrganizer().getEmailAddress().getName()
 						: null)
-				.modificabile(isAdmin).build();
+				.modificabile(isAdmin)
+				.seriesMasterId(seriesMasterId)
+				.ricorrente(ricorrente)
+				.pattern(pattern)
+				.build();
+	}
+
+	private void validaRicorrenza(PrenotazioneRequestDTO request) {
+		String pattern = request.getPattern();
+		if (pattern == null || pattern.isEmpty()) {
+			throw new IllegalArgumentException("Il tipo di ricorrenza non può essere vuoto.");
+		}
+
+		List<String> validi = List.of("daily", "weekly", "monthly", "yearly");
+		if (!validi.contains(pattern.toLowerCase())) {
+			throw new IllegalArgumentException("Tipo di ricorrenza non valido: " + pattern);
+		}
+
+		if (request.getDataFine() == null || request.getDataFine().isEmpty()) {
+			throw new IllegalArgumentException("La data di fine ricorrenza è obbligatoria.");
+		}
+
+		if ("weekly".equalsIgnoreCase(pattern) && (request.getGiorniSettimana() == null || request.getGiorniSettimana().isEmpty())) {
+			throw new IllegalArgumentException("Per la ricorrenza settimanale devi selezionare almeno un giorno.");
+		}
+
+		if (request.getIntervallo() != null && request.getIntervallo() < 1) {
+			throw new IllegalArgumentException("L'intervallo deve essere almeno 1.");
+		}
 	}
 
 	private void validaOrariPrenotazione(String startStr, String endStr) {
