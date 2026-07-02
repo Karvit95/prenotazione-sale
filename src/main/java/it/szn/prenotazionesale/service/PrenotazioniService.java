@@ -18,6 +18,7 @@ import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -45,8 +46,27 @@ public class PrenotazioniService {
 	// e serve un lock distribuito (es. su un DB condiviso).
 	private final ConcurrentHashMap<String, ReentrantLock> lockPerSala = new ConcurrentHashMap<>();
 
+	// Whitelist rigorosa per parametri usati in un filtro OData: solo cifre, T, :, ., -, +, Z.
+	// Copre sia il formato ISO UTC con 'Z' inviato dal frontend (2026-07-10T08:00:00.000Z)
+	// sia il formato "naive" locale usato dalle chiamate interne (2026-07-10T08:00:00).
+	// Qualsiasi altro carattere (apici, spazi, parole chiave OData come "or"/"eq") viene rifiutato.
+	private static final Pattern PATTERN_DATA_FILTRO = Pattern.compile(
+			"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?(Z|[+-]\\d{2}:\\d{2})?$");
+
+	private void validaParametroFiltroData(String valore, String nomeParametro) {
+		if (valore == null || !PATTERN_DATA_FILTRO.matcher(valore).matches()) {
+			log.warn("Parametro '{}' rifiutato per il filtro prenotazioni: valore non conforme al formato atteso", nomeParametro);
+			throw new IllegalArgumentException(
+					"Errore: il parametro '" + nomeParametro + "' deve essere una data/ora in formato ISO-8601 valido.");
+		}
+	}
+
 	public List<PrenotazioneDTO> getPrenotazioni(String salaEmail, String dataInizio, String dataFine, Jwt jwt) {
 		log.info("Richiesta prenotazioni per sala {} dal {} al {}", salaEmail, dataInizio, dataFine);
+
+		validaParametroFiltroData(dataInizio, "dataInizio");
+		validaParametroFiltroData(dataFine, "dataFine");
+
 		String filter = String.format("start/dateTime ge '%s' and end/dateTime le '%s'", dataInizio, dataFine);
 
 		var events = graphClient.users().byUserId(salaEmail).calendar().events().get(req -> {
