@@ -5,6 +5,7 @@ import com.microsoft.graph.serviceclient.GraphServiceClient;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
 import it.szn.prenotazionesale.model.SalaDTO;
+import jakarta.annotation.PreDestroy;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -16,11 +17,13 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 @Slf4j
 @AllArgsConstructor
@@ -45,6 +48,19 @@ public class PrenotazioniService {
 	// basta più
 	// e serve un lock distribuito (es. su un DB condiviso).
 	private final ConcurrentHashMap<String, ReentrantLock> lockPerSala = new ConcurrentHashMap<>();
+
+	// Executor dedicato per le chiamate Graph fatte in parallelo su più sale
+	// (usato da getPrenotazioniTutteSale). Dimensionato per lavoro I/O-bound
+	// (thread bloccati in attesa di rete verso Graph), non CPU-bound: a differenza
+	// del ForkJoinPool.commonPool() usato di default da parallelStream(), questo
+	// pool non è condiviso col resto della JVM e la sua dimensione riflette il
+	// numero di sale gestite, non il numero di core della macchina.
+	private final ExecutorService executorGraphParallelo = Executors.newFixedThreadPool(20);
+
+	@PreDestroy
+	public void shutdown() {
+		executorGraphParallelo.shutdown();
+	}
 
 	// Whitelist rigorosa per parametri usati in un filtro OData: solo cifre, T, :, ., -, +, Z.
 	// Copre sia il formato ISO UTC con 'Z' inviato dal frontend (2026-07-10T08:00:00.000Z)
@@ -84,15 +100,22 @@ public class PrenotazioniService {
 		log.info("Richiesta prenotazioni per tutte le sale dal {} al {}", dataInizio, dataFine);
 		List<SalaDTO> tutteLeSale = saleService.getSale();
 
-		return tutteLeSale.parallelStream().<PrenotazioneDTO>flatMap(sala -> {
-			try {
-				List<PrenotazioneDTO> lista = getPrenotazioni(sala.getEmail(), dataInizio, dataFine, jwt);
-				return lista.stream();
-			} catch (Exception e) {
-				log.error("Errore nel recupero prenotazioni per la sala {}: {}", sala.getEmail(), e.getMessage(), e);
-				return Stream.<PrenotazioneDTO>empty();
-			}
-		}).collect(Collectors.toList());
+		List<CompletableFuture<List<PrenotazioneDTO>>> futures = tutteLeSale.stream()
+				.map(sala -> CompletableFuture.supplyAsync(() -> {
+					try {
+						return getPrenotazioni(sala.getEmail(), dataInizio, dataFine, jwt);
+					} catch (Exception e) {
+						log.error("Errore nel recupero prenotazioni per la sala {}: {}", sala.getEmail(),
+								e.getMessage(), e);
+						return List.<PrenotazioneDTO>of();
+					}
+				}, executorGraphParallelo))
+				.collect(Collectors.toList());
+
+		return futures.stream()
+				.map(CompletableFuture::join)
+				.flatMap(List::stream)
+				.collect(Collectors.toList());
 	}
 
 	public PrenotazioneDTO creaPrenotazione(PrenotazioneRequestDTO request, Jwt jwt) {
