@@ -305,7 +305,13 @@ public class PrenotazioniService {
 		if (request.getPattern() != null && !request.getPattern().isEmpty()) {
 			PatternedRecurrence recurrence = new PatternedRecurrence();
 
-			// Pattern
+			// Estrazione unica della data di inizio per evitare conflitti o duplicazioni di variabili
+			String startDateStr = request.getStart().length() > 10
+					? request.getStart().substring(0, 10)
+					: request.getStart();
+			LocalDate dataInizio = LocalDate.parse(startDateStr);
+
+			// 1. Configurazione del Pattern
 			RecurrencePattern pattern = new RecurrencePattern();
 			pattern.setInterval(request.getIntervallo() != null ? request.getIntervallo() : 1);
 
@@ -317,15 +323,25 @@ public class PrenotazioniService {
 					pattern.setType(RecurrencePatternType.Weekly);
 					if (request.getGiorniSettimana() != null && !request.getGiorniSettimana().isEmpty()) {
 						pattern.setDaysOfWeek(request.getGiorniSettimana().stream()
-								.map(giorno -> DayOfWeek.forValue(giorno))
+								// La SDK Microsoft Graph richiede i giorni rigorosamente in minuscolo (es: "monday")
+								.map(giorno -> DayOfWeek.forValue(giorno.toLowerCase()))
 								.collect(Collectors.toList()));
+					} else {
+						// Fallback di sicurezza: se la lista è vuota usa il giorno della data di inizio
+						String dayName = dataInizio.getDayOfWeek().name().toLowerCase();
+						pattern.setDaysOfWeek(List.of(DayOfWeek.forValue(dayName)));
 					}
 					break;
 				case "monthly":
 					pattern.setType(RecurrencePatternType.AbsoluteMonthly);
+					// OBBLIGATORIO per Microsoft Graph: fissa il giorno del mese (es. il 15 di ogni mese)
+					pattern.setDayOfMonth(dataInizio.getDayOfMonth());
 					break;
 				case "yearly":
 					pattern.setType(RecurrencePatternType.AbsoluteYearly);
+					// OBBLIGATORIO per Microsoft Graph: fissa giorno e mese numerico dell'anno
+					pattern.setDayOfMonth(dataInizio.getDayOfMonth());
+					pattern.setMonth(dataInizio.getMonthValue());
 					break;
 				default:
 					throw new IllegalArgumentException("Tipo di ricorrenza non supportato: " + request.getPattern());
@@ -333,7 +349,7 @@ public class PrenotazioniService {
 
 			recurrence.setPattern(pattern);
 
-			// Range
+			// 2. Configurazione del Range
 			RecurrenceRange range = new RecurrenceRange();
 			range.setType(RecurrenceRangeType.EndDate);
 
@@ -348,10 +364,8 @@ public class PrenotazioniService {
 				range.setType(RecurrenceRangeType.Numbered);
 			}
 
-			String startDateStr = request.getStart().length() > 10
-					? request.getStart().substring(0, 10)
-					: request.getStart();
-			range.setStartDate(LocalDate.parse(startDateStr));
+			// Riutilizzo pulito della variabile dataInizio estratta in precedenza
+			range.setStartDate(dataInizio);
 
 			recurrence.setRange(range);
 
