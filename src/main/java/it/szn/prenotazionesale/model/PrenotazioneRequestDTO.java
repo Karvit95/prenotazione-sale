@@ -46,4 +46,11 @@ public class PrenotazioneRequestDTO {
 
     /** "SINGOLA" | "SERIE" — per PATCH/DELETE su eventi ricorrenti */
     private String tipoModifica;
+
+    /**
+     * ID del series master su Graph, presente solo se l'evento che si sta
+     * modificando/cancellando è un'occorrenza di una serie ricorrente.
+     * Necessario per operare correttamente su "tutta la serie"
+     */
+    private String seriesMasterId;
 }

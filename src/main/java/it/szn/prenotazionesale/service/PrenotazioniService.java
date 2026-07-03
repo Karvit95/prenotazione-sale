@@ -161,7 +161,17 @@ public class PrenotazioniService {
 			PrenotazioneDTO nuovaPrenotazione = creaPrenotazione(request, jwt);
 
 			try {
-				cancellaPrenotazione(eventId, salaOriginale, jwt);
+				// Stessa logica delle altre operazioni sulle serie: se la modifica riguarda
+				// tutta la serie e abbiamo il seriesMasterId, va cancellato quello — non
+				// l'ID dell'occorrenza cliccata, altrimenti resterebbero attive le altre
+				// occorrenze della vecchia serie sulla sala originale.
+				boolean modificaSerie = "SERIE".equals(request.getTipoModifica());
+				String idDaCancellare = (modificaSerie && request.getSeriesMasterId() != null
+						&& !request.getSeriesMasterId().isBlank())
+								? request.getSeriesMasterId()
+								: eventId;
+
+				cancellaPrenotazione(idDaCancellare, salaOriginale, jwt);
 			} catch (Exception e) {
 				log.error(
 						"Prenotazione spostata con ID nuovo {} ma impossibile cancellare l'evento originale {} sulla sala {}: rimane una prenotazione duplicata da rimuovere manualmente",
@@ -187,11 +197,18 @@ public class PrenotazioniService {
 			boolean modificaSerie = "SERIE".equals(tipoModifica);
 
 			if (modificaSerie) {
-				// PATCH sul series master
+				// PATCH sul series master: in Graph, l'effetto del PATCH dipende da QUALE ID
+				// usi, non da un flag. Se abbiamo l'ID del series master (evento ricorrente),
+				// dobbiamo usare quello — l'ID dell'occorrenza cliccata toccherebbe solo
+				// quella singola data, vanificando la scelta "modifica tutta la serie".
+				String idSuCuiOperare = (request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank())
+						? request.getSeriesMasterId()
+						: eventId; // evento non ricorrente: eventId è già l'ID corretto
+
 				var event = buildEvent(request);
-				var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events().byEventId(eventId)
-						.patch(event);
-				log.info("Prenotazione (serie) {} modificata con successo", eventId);
+				var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events()
+						.byEventId(idSuCuiOperare).patch(event);
+				log.info("Prenotazione (serie, ID {}) modificata con successo", idSuCuiOperare);
 				return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
 			} else {
 				// PATCH sulla singola occorrenza: costruiamo un corpo che aggiorni solo
@@ -230,32 +247,29 @@ public class PrenotazioniService {
 	}
 
 	public void cancellaPrenotazione(String eventId, String salaEmail, Jwt jwt) {
-		cancellaPrenotazione(eventId, salaEmail, "SERIE", jwt);
+		cancellaPrenotazione(eventId, salaEmail, "SERIE", null, jwt);
 	}
 
-	public void cancellaPrenotazione(String eventId, String salaEmail, String tipoCancellazione, Jwt jwt) {
-		log.info("Cancellazione prenotazione ID {} per sala {} (tipo: {})", eventId, salaEmail, tipoCancellazione);
+	public void cancellaPrenotazione(String eventId, String salaEmail, String tipoCancellazione, String seriesMasterId, Jwt jwt) {
+		log.info("Cancellazione prenotazione ID {} per sala {} (tipo: {}, seriesMasterId: {})", eventId, salaEmail,
+				tipoCancellazione, seriesMasterId);
 		verificaAdmin(jwt);
 
 		ReentrantLock lock = getLockPerSala(salaEmail);
 		lock.lock();
 
 		try {
-			if ("SINGOLA".equals(tipoCancellazione)) {
-				// Per cancellare una singola occorrenza di un evento ricorrente:
-				// Graph API non permette DELETE, ma bisogna fare PATCH con isCancelled=true
-				var cancelEvent = new Event();
-				cancelEvent.setIsCancelled(true);
+			// In Graph, cancellare un'occorrenza singola o l'intera serie usa la STESSA
+			// operazione (DELETE): cambia solo l'ID target. Passare l'ID del series master
+			// cancella tutta la serie; passare l'ID di un'occorrenza cancella solo quella data.
+			// Non serve (e non è affidabile) un PATCH con isCancelled=true.
+			String idSuCuiOperare = "SERIE".equals(tipoCancellazione) && seriesMasterId != null && !seriesMasterId.isBlank()
+					? seriesMasterId
+					: eventId; // occorrenza singola, oppure evento non ricorrente
 
-				graphClient.users().byUserId(salaEmail).events().byEventId(eventId)
-						.patch(cancelEvent);
-
-				log.info("Occorrenza singola {} cancellata (isCancelled=true) sulla sala {}", eventId, salaEmail);
-			} else {
-				// Cancellazione dell'intera serie (o evento singolo)
-				graphClient.users().byUserId(salaEmail).events().byEventId(eventId).delete();
-				log.info("Prenotazione (serie) {} cancellata dalla sala {}", eventId, salaEmail);
-			}
+			graphClient.users().byUserId(salaEmail).events().byEventId(idSuCuiOperare).delete();
+			log.info("Prenotazione {} cancellata dalla sala {} (tipo richiesto: {})", idSuCuiOperare, salaEmail,
+					tipoCancellazione);
 
 		} finally {
 			lock.unlock();
