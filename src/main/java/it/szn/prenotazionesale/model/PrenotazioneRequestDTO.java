@@ -32,7 +32,7 @@ public class PrenotazioneRequestDTO {
 
     // --- Campi per ricorrenza ---
 
-    /** "daily" | "weekly" | "monthly" | "yearly" — null se evento singolo */
+    /** "daily" | "weekly" | "monthly" — null se evento singolo */
     private String pattern;
 
     /** Ogni N giorni/settimane/mesi (default: 1) */

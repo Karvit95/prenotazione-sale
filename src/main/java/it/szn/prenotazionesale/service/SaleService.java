@@ -1,5 +1,6 @@
 package it.szn.prenotazionesale.service;
 
+import com.microsoft.graph.models.Room;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
 import it.szn.prenotazionesale.model.SalaDTO;
 import lombok.AllArgsConstructor;

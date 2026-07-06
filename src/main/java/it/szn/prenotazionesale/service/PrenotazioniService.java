@@ -17,6 +17,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -135,7 +136,7 @@ public class PrenotazioniService {
 		lock.lock();
 
 		try {
-			verificaDisponibilita(request.getSalaEmail(), request.getStart(), request.getEnd(), null, jwt);
+			verificaDisponibilita(request, null, jwt);
 			var event = buildEvent(request);
 			var createdEvent = graphClient.users().byUserId(request.getSalaEmail()).calendar().events().post(event);
 
@@ -190,26 +191,94 @@ public class PrenotazioniService {
 		lock.lock();
 
 		try {
-			verificaDisponibilita(request.getSalaEmail(), request.getStart(), request.getEnd(), eventId, jwt);
+			verificaDisponibilita(request, eventId, jwt);
 
 			// Determina se modificare la singola occorrenza o l'intera serie
 			String tipoModifica = request.getTipoModifica();
 			boolean modificaSerie = "SERIE".equals(tipoModifica);
 
-			if (modificaSerie) {
-				// PATCH sul series master: in Graph, l'effetto del PATCH dipende da QUALE ID
-				// usi, non da un flag. Se abbiamo l'ID del series master (evento ricorrente),
-				// dobbiamo usare quello — l'ID dell'occorrenza cliccata toccherebbe solo
-				// quella singola data, vanificando la scelta "modifica tutta la serie".
-				String idSuCuiOperare = (request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank())
-						? request.getSeriesMasterId()
-						: eventId; // evento non ricorrente: eventId è già l'ID corretto
+	if (modificaSerie) {
+			// PATCH sul series master: in Graph, l'effetto del PATCH dipende da QUALE ID
+			// usi, non da un flag. Se abbiamo l'ID del series master (evento ricorrente),
+			// dobbiamo usare quello — l'ID dell'occorrenza cliccata toccherebbe solo
+			// quella singola data, vanificando la scelta "modifica tutta la serie".
+			String idSuCuiOperare = (request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank())
+					? request.getSeriesMasterId()
+					: eventId; // evento non ricorrente: eventId è già l'ID corretto
 
-				var event = buildEvent(request);
-				var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events()
-						.byEventId(idSuCuiOperare).patch(event);
-				log.info("Prenotazione (serie, ID {}) modificata con successo", idSuCuiOperare);
-				return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
+			// Non usiamo buildEvent() perché includerebbe il campo recurrence,
+			// che su Graph SOSTITUIREBBE (non unirebbe) la definizione della
+			// ricorrenza originale. Invece costruiamo un corpo che aggiorni solo
+			// i campi base (titolo, descrizione, start/end) SENZA il campo
+			// recurrence: in questo modo Graph preserva la ricorrenza originale
+			// dell'evento master.
+			var event = new Event();
+			event.setSubject(request.getTitolo());
+
+			if (request.getDescrizione() != null) {
+				var body = new ItemBody();
+				body.setContent(request.getDescrizione());
+				body.setContentType(BodyType.Text);
+				event.setBody(body);
+			}
+
+			// IMPORTANTE: quando si modifica l'INTERA SERIE, la request contiene la data
+			// dell'occorrenza su cui l'utente ha cliccato, NON la data originale del series
+			// master. Se usassimo request.getStart() così com'è, il PATCH cambierebbe anche
+			// la data di inizio del master, causando la re-evaluazione di tutte le eccezioni
+			// (occorrenze con data modificata individualmente) da parte di Graph API.
+			//
+			// Per evitare questo bug, recuperiamo l'evento master corrente e preserviamo
+			// la sua data originale (AAAA-MM-GG), applicando solo il nuovo orario richiesto.
+			String nuovoStartDateTime;
+			String nuovoEndDateTime;
+
+			try {
+				// Recupera l'evento master per ottenere la data originale
+				var existingMaster = graphClient.users().byUserId(request.getSalaEmail()).events()
+						.byEventId(idSuCuiOperare).get();
+
+				String dataOriginaleMaster = existingMaster.getStart().getDateTime().substring(0, 10);
+
+				// Calcola la durata dalla request
+				LocalDateTime reqStart = LocalDateTime.parse(request.getStart().substring(0, 19));
+				LocalDateTime reqEnd = LocalDateTime.parse(request.getEnd().substring(0, 19));
+				long durataMinuti = java.time.Duration.between(reqStart, reqEnd).toMinutes();
+
+				// Nuovo start: data originale del master + orario dalla request
+				String nuovoOrario = request.getStart().substring(11, 19); // HH:mm:ss
+				nuovoStartDateTime = dataOriginaleMaster + "T" + nuovoOrario;
+
+				// Nuovo end: stessa data originale + (orario dalla request + durata)
+				LocalDateTime nuovoEndLDT = LocalDateTime.parse(dataOriginaleMaster + "T" + nuovoOrario)
+						.plusMinutes(durataMinuti);
+				nuovoEndDateTime = nuovoEndLDT.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
+
+				log.debug("Modifica SERIE: preservata data originale master {} con nuovo orario {} -> start={}, end={}",
+						dataOriginaleMaster, nuovoOrario, nuovoStartDateTime, nuovoEndDateTime);
+			} catch (Exception e) {
+				// Fallback: se non riusciamo a leggere il master, usiamo i valori originali
+				// (comportamento pre-bugfix, potrebbe comunque causare il bug ma non blocca l'operazione)
+				log.warn("Impossibile recuperare il master per preservare la data originale, uso i valori della request: {}",
+						e.getMessage());
+				nuovoStartDateTime = request.getStart();
+				nuovoEndDateTime = request.getEnd();
+			}
+
+			var start = new DateTimeTimeZone();
+			start.setDateTime(nuovoStartDateTime);
+			start.setTimeZone("Europe/Rome");
+			event.setStart(start);
+
+			var end = new DateTimeTimeZone();
+			end.setDateTime(nuovoEndDateTime);
+			end.setTimeZone("Europe/Rome");
+			event.setEnd(end);
+
+			var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events()
+					.byEventId(idSuCuiOperare).patch(event);
+			log.info("Prenotazione (serie, ID {}) modificata con successo", idSuCuiOperare);
+			return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
 			} else {
 				// PATCH sulla singola occorrenza: costruiamo un corpo che aggiorni solo
 				// i campi base (start/end/titolo/descrizione) SENZA la ricorrenza
@@ -337,12 +406,6 @@ public class PrenotazioniService {
 					// OBBLIGATORIO per Microsoft Graph: fissa il giorno del mese (es. il 15 di ogni mese)
 					pattern.setDayOfMonth(dataInizio.getDayOfMonth());
 					break;
-				case "yearly":
-					pattern.setType(RecurrencePatternType.AbsoluteYearly);
-					// OBBLIGATORIO per Microsoft Graph: fissa giorno e mese numerico dell'anno
-					pattern.setDayOfMonth(dataInizio.getDayOfMonth());
-					pattern.setMonth(dataInizio.getMonthValue());
-					break;
 				default:
 					throw new IllegalArgumentException("Tipo di ricorrenza non supportato: " + request.getPattern());
 			}
@@ -398,8 +461,7 @@ public class PrenotazioniService {
 					case Daily: pattern = "daily"; break;
 					case Weekly: pattern = "weekly"; break;
 					case AbsoluteMonthly: pattern = "monthly"; break;
-					case AbsoluteYearly: pattern = "yearly"; break;
-					default: pattern = patternType.toString().toLowerCase();
+				default: pattern = patternType.toString().toLowerCase();
 				}
 			}
 		}
@@ -425,13 +487,28 @@ public class PrenotazioniService {
 			throw new IllegalArgumentException("Il tipo di ricorrenza non può essere vuoto.");
 		}
 
-		List<String> validi = List.of("daily", "weekly", "monthly", "yearly");
+		List<String> validi = List.of("daily", "weekly", "monthly");
 		if (!validi.contains(pattern.toLowerCase())) {
 			throw new IllegalArgumentException("Tipo di ricorrenza non valido: " + pattern);
 		}
 
 		if (request.getDataFine() == null || request.getDataFine().isEmpty()) {
 			throw new IllegalArgumentException("La data di fine ricorrenza è obbligatoria.");
+		}
+
+		// La data di fine ricorrenza deve essere >= data di inizio
+		try {
+			LocalDate startDate = LocalDate.parse(request.getStart().substring(0, 10));
+			LocalDate endDate = LocalDate.parse(request.getDataFine().substring(0, 10));
+			if (endDate.isBefore(startDate)) {
+				log.warn("Validazione fallita: dataFine={} precedente a start={}", request.getDataFine(), request.getStart());
+				throw new IllegalArgumentException(
+						"Errore: la data di fine ricorrenza deve essere successiva o uguale alla data di inizio.");
+			}
+		} catch (DateTimeParseException e) {
+			log.warn("Validazione fallita: formato data non valido in validaRicorrenza: start={}, dataFine={}",
+					request.getStart(), request.getDataFine());
+			throw new IllegalArgumentException("Errore: formato data non valido per la ricorrenza.");
 		}
 
 		if ("weekly".equalsIgnoreCase(pattern) && (request.getGiorniSettimana() == null || request.getGiorniSettimana().isEmpty())) {
@@ -461,36 +538,48 @@ public class PrenotazioniService {
 		}
 	}
 
-	private void verificaDisponibilita(String salaEmail, String startStr, String endStr, String eventIdDaEscludere,
-			Jwt jwt) {
-		log.debug("Verifica disponibilità sala {} dal {} al {} (esclude eventId={})", salaEmail, startStr, endStr,
-				eventIdDaEscludere);
+	private void verificaDisponibilita(PrenotazioneRequestDTO request, String eventIdDaEscludere, Jwt jwt) {
+		String salaEmail = request.getSalaEmail();
+		
+		// 1. Genera tutte le occorrenze previste per la prenotazione
+		List<LocalDateTime[]> occorrenze = generaOccorrenze(request);
+		if (occorrenze.isEmpty()) return;
 
-		LocalDateTime nuovoStart = LocalDateTime.parse(startStr);
-		LocalDateTime nuovoEnd = LocalDateTime.parse(endStr);
+		// 2. Finestra temporale totale per la chiamata Graph API
+		LocalDateTime primoInizio = occorrenze.get(0)[0];
+		LocalDateTime ultimaFine = occorrenze.get(occorrenze.size() - 1)[1];
 
-		// Recuperiamo gli eventi del giorno interessato (margine ampio per coprire
-		// eventi a cavallo)
 		DateTimeFormatter formatoFiltro = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
-		String filtroInizio = nuovoStart.toLocalDate().atStartOfDay().format(formatoFiltro);
-		String filtroFine = nuovoStart.toLocalDate().plusDays(1).atStartOfDay().format(formatoFiltro);
+		String filtroInizio = primoInizio.toLocalDate().atStartOfDay().format(formatoFiltro);
+		String filtroFine = ultimaFine.toLocalDate().plusDays(1).atStartOfDay().format(formatoFiltro);
 
+		// 3. Recupera gli eventi nel maxi-periodo
 		List<PrenotazioneDTO> eventiEsistenti = getPrenotazioni(salaEmail, filtroInizio, filtroFine, jwt);
 
-		boolean conflitto = eventiEsistenti.stream()
-				.filter(e -> eventIdDaEscludere == null || !e.getId().equals(eventIdDaEscludere)).anyMatch(e -> {
-					if (e.getStart() == null || e.getEnd() == null)
-						return false;
-					LocalDateTime esistenteStart = LocalDateTime.parse(e.getStart());
-					LocalDateTime esistenteEnd = LocalDateTime.parse(e.getEnd());
-					// Overlap se: inizio esistente prima della fine nuova E fine esistente dopo
-					// l'inizio nuovo
-					return esistenteStart.isBefore(nuovoEnd) && esistenteEnd.isAfter(nuovoStart);
-				});
+		// 4. Verifica sovrapposizioni per singola occorrenza
+		for (LocalDateTime[] occorrenza : occorrenze) {
+			LocalDateTime nuovoStart = occorrenza[0];
+			LocalDateTime nuovoEnd = occorrenza[1];
 
-		if (conflitto) {
-			log.warn("Conflitto rilevato: sala {} già occupata dal {} al {}", salaEmail, startStr, endStr);
-			throw new IllegalArgumentException("Errore: la sala è già occupata nella fascia oraria selezionata.");
+			boolean conflitto = eventiEsistenti.stream()
+					.filter(e -> eventIdDaEscludere == null || !e.getId().equals(eventIdDaEscludere))
+					.anyMatch(e -> {
+						if (e.getStart() == null || e.getEnd() == null) return false;
+						
+						// Pulizia stringa per parse safe
+						String startPulito = e.getStart().length() > 19 ? e.getStart().substring(0, 19) : e.getStart();
+						String endPulito = e.getEnd().length() > 19 ? e.getEnd().substring(0, 19) : e.getEnd();
+						
+						LocalDateTime esistenteStart = LocalDateTime.parse(startPulito);
+						LocalDateTime esistenteEnd = LocalDateTime.parse(endPulito);
+						
+						return esistenteStart.isBefore(nuovoEnd) && esistenteEnd.isAfter(nuovoStart);
+					});
+
+			if (conflitto) {
+				log.warn("Conflitto rilevato: sala {} già occupata in data {}", salaEmail, nuovoStart.toLocalDate());
+				throw new IllegalArgumentException(String.format("Errore: la sala risulta già occupata il %s nella fascia oraria richiesta.", nuovoStart.toLocalDate().toString()));
+			}
 		}
 	}
 
@@ -511,5 +600,50 @@ public class PrenotazioniService {
 	private ReentrantLock getLockPerSala(String salaEmail) {
 		String chiave = salaEmail.trim().toLowerCase();
 		return lockPerSala.computeIfAbsent(chiave, k -> new ReentrantLock());
+	}
+	
+	private List<LocalDateTime[]> generaOccorrenze(PrenotazioneRequestDTO request) {
+		List<LocalDateTime[]> occorrenze = new ArrayList<>();
+		LocalDateTime start = LocalDateTime.parse(request.getStart());
+		LocalDateTime end = LocalDateTime.parse(request.getEnd());
+		
+		// Se è un evento singolo, restituisce solo l'unica occorrenza
+		if (request.getPattern() == null || request.getPattern().isBlank()) {
+			occorrenze.add(new LocalDateTime[]{start, end});
+			return occorrenze;
+		}
+
+		// Calcolo ricorrenze
+		LocalDate dataFine = LocalDate.parse(request.getDataFine().substring(0, 10));
+		int interval = request.getIntervallo() != null ? request.getIntervallo() : 1;
+		long durationMinutes = java.time.Duration.between(start, end).toMinutes();
+
+		switch (request.getPattern().toLowerCase()) {
+			case "daily":
+				for (LocalDate d = start.toLocalDate(); !d.isAfter(dataFine); d = d.plusDays(interval)) {
+					occorrenze.add(new LocalDateTime[]{d.atTime(start.toLocalTime()), d.atTime(start.toLocalTime()).plusMinutes(durationMinutes)});
+				}
+				break;
+			case "weekly":
+				// Usa java.time.DayOfWeek con FQDN per evitare conflitti con l'enum di Graph
+				LocalDate weekStart = start.toLocalDate().with(java.time.DayOfWeek.MONDAY);
+				for (LocalDate ws = weekStart; !ws.isAfter(dataFine); ws = ws.plusWeeks(interval)) {
+					for (String giorno : request.getGiorniSettimana()) {
+						java.time.DayOfWeek dow = java.time.DayOfWeek.valueOf(giorno.toUpperCase());
+						LocalDate d = ws.with(dow);
+						// Filtra i giorni precedenti alla data di inizio effettiva o successivi alla fine
+						if (!d.isBefore(start.toLocalDate()) && !d.isAfter(dataFine)) {
+							occorrenze.add(new LocalDateTime[]{d.atTime(start.toLocalTime()), d.atTime(start.toLocalTime()).plusMinutes(durationMinutes)});
+						}
+					}
+				}
+				break;
+			case "monthly":
+				for (LocalDate d = start.toLocalDate(); !d.isAfter(dataFine); d = d.plusMonths(interval)) {
+					occorrenze.add(new LocalDateTime[]{d.atTime(start.toLocalTime()), d.atTime(start.toLocalTime()).plusMinutes(durationMinutes)});
+				}
+				break;
+		}
+		return occorrenze;
 	}
 }

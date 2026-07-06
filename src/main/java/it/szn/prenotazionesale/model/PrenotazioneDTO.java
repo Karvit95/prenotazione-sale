@@ -30,6 +30,6 @@ public class PrenotazioneDTO {
     /** true se l'evento fa parte di una serie ricorrente */
     private boolean ricorrente;
 
-    /** "daily" | "weekly" | "monthly" | "yearly" — per visualizzazione */
+    /** "daily" | "weekly" | "monthly" — per visualizzazione */
     private String pattern;
 }
