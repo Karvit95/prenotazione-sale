@@ -194,7 +194,9 @@ public class PrenotazioniService {
                         request.getSeriesMasterId(), salaOriginale);
 
                 var masterOriginale = graphClient.users().byUserId(salaOriginale).events()
-                        .byEventId(request.getSeriesMasterId()).get();
+                        .byEventId(request.getSeriesMasterId()).get(req -> {
+                            req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
+                        });
 
                 // Verifica disponibilità sulla sala di destinazione per tutta la serie prima di creare
                 PrenotazioneRequestDTO checkRequest = new PrenotazioneRequestDTO();
@@ -367,7 +369,9 @@ public class PrenotazioniService {
             try {
                 // Recupera l'evento master per ottenere la data originale
                 var existingMaster = graphClient.users().byUserId(request.getSalaEmail()).events()
-                        .byEventId(idSuCuiOperare).get();
+                        .byEventId(idSuCuiOperare).get(req -> {
+                            req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
+                        });
 
                 String dataOriginaleMaster = existingMaster.getStart().getDateTime().substring(0, 10);
 
