@@ -707,12 +707,14 @@ public class PrenotazioniService {
         }
         String testo = html.replaceAll("<[^>]*>", "");
         testo = testo.replace("\u00a0", " ");
-        testo = testo.replace("&", "&");
-        testo = testo.replace("<", "<");
-        testo = testo.replace(">", ">");
+        testo = testo.replace("&nbsp;", " ");
+        testo = testo.replace("&amp;", "&");
+        testo = testo.replace("&lt;", "<");
+        testo = testo.replace("&gt;", ">");
+        testo = testo.replace("&quot;", "\"");
         testo = testo.replace("&#39;", "'");
         testo = testo.replaceAll("\\s+", " ").trim();
-        return testo;
+        return testo.isEmpty() ? null : testo;
     }
     
     private List<LocalDateTime[]> generaOccorrenze(PrenotazioneRequestDTO request) {
