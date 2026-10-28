@@ -324,11 +324,14 @@ public class PrenotazioniService {
         lock.lock();
 
         try {
-            verificaDisponibilita(request, eventId, jwt);
-
             // Determina se modificare la singola occorrenza o l'intera serie
             String tipoModifica = request.getTipoModifica();
             boolean modificaSerie = "SERIE".equals(tipoModifica);
+
+            String seriesMasterIdDaEscludere = modificaSerie 
+                    ? ((request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank()) ? request.getSeriesMasterId() : eventId)
+                    : null;
+            verificaDisponibilita(request, eventId, seriesMasterIdDaEscludere, jwt);
 
         if (modificaSerie) {
             // PATCH sul series master: in Graph, l'effetto del PATCH dipende da QUALE ID
@@ -682,6 +685,10 @@ public class PrenotazioniService {
     }
 
     private void verificaDisponibilita(PrenotazioneRequestDTO request, String eventIdDaEscludere, Jwt jwt) {
+        verificaDisponibilita(request, eventIdDaEscludere, null, jwt);
+    }
+
+    private void verificaDisponibilita(PrenotazioneRequestDTO request, String eventIdDaEscludere, String seriesMasterIdDaEscludere, Jwt jwt) {
         String salaEmail = request.getSalaEmail();
         
         // 1. Genera tutte le occorrenze previste per la prenotazione
@@ -705,7 +712,16 @@ public class PrenotazioniService {
             LocalDateTime nuovoEnd = occorrenza[1];
 
             boolean conflitto = eventiEsistenti.stream()
-                    .filter(e -> eventIdDaEscludere == null || !e.getId().equals(eventIdDaEscludere))
+                    .filter(e -> {
+                        if (eventIdDaEscludere != null && e.getId().equals(eventIdDaEscludere)) {
+                            return false;
+                        }
+                        if (seriesMasterIdDaEscludere != null) {
+                            if (seriesMasterIdDaEscludere.equals(e.getId())) return false;
+                            if (seriesMasterIdDaEscludere.equals(e.getSeriesMasterId())) return false;
+                        }
+                        return true;
+                    })
                     .anyMatch(e -> {
                         if (e.getStart() == null || e.getEnd() == null) return false;
                         
