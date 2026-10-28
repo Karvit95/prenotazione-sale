@@ -379,6 +379,7 @@ public class PrenotazioniService {
             // la sua data originale (AAAA-MM-GG), applicando solo il nuovo orario richiesto.
             String nuovoStartDateTime;
             String nuovoEndDateTime;
+            boolean orarioModificato = true;
 
             try {
                 // Recupera l'evento master per ottenere la data originale
@@ -403,8 +404,15 @@ public class PrenotazioniService {
                         .plusMinutes(durataMinuti);
                 nuovoEndDateTime = nuovoEndLDT.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
 
-                log.debug("Modifica SERIE: preservata data originale master {} con nuovo orario {} -> start={}, end={}",
-                        dataOriginaleMaster, nuovoOrario, nuovoStartDateTime, nuovoEndDateTime);
+                // In Graph API, aggiornare start/end sul series master cancella tutte le eccezioni della serie.
+                // Aggiorniamo start/end solo se l'orario Ã¨ effettivamente cambiato rispetto al master esistente.
+                String masterStartOriginale = existingMaster.getStart() != null ? existingMaster.getStart().getDateTime() : "";
+                if (masterStartOriginale.length() >= 19 && masterStartOriginale.substring(11, 19).equals(nuovoOrario)) {
+                    orarioModificato = false;
+                }
+
+                log.debug("Modifica SERIE: preservata data originale master {} con nuovo orario {} -> start={}, end={}, orarioModificato={}",
+                        dataOriginaleMaster, nuovoOrario, nuovoStartDateTime, nuovoEndDateTime, orarioModificato);
             } catch (Exception e) {
                 // Fallback: se non riusciamo a leggere il master, usiamo i valori originali
                 // (comportamento pre-bugfix, potrebbe comunque causare il bug ma non blocca l'operazione)
@@ -414,15 +422,17 @@ public class PrenotazioniService {
                 nuovoEndDateTime = request.getEnd();
             }
 
-            var start = new DateTimeTimeZone();
-            start.setDateTime(nuovoStartDateTime);
-            start.setTimeZone("Europe/Rome");
-            event.setStart(start);
+            if (orarioModificato) {
+                var start = new DateTimeTimeZone();
+                start.setDateTime(nuovoStartDateTime);
+                start.setTimeZone("Europe/Rome");
+                event.setStart(start);
 
-            var end = new DateTimeTimeZone();
-            end.setDateTime(nuovoEndDateTime);
-            end.setTimeZone("Europe/Rome");
-            event.setEnd(end);
+                var end = new DateTimeTimeZone();
+                end.setDateTime(nuovoEndDateTime);
+                end.setTimeZone("Europe/Rome");
+                event.setEnd(end);
+            }
 
             var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events()
                     .byEventId(idSuCuiOperare).patch(event);
@@ -784,6 +794,10 @@ public class PrenotazioniService {
             throw new IllegalArgumentException("L'email della sala non puo essere vuota.");
         }
         String chiave = salaEmail.trim().toLowerCase();
+        ReentrantLock existing = lockPerSala.get(chiave);
+        if (existing != null) {
+            return existing;
+        }
         boolean esiste = saleService.getSale().stream()
                 .anyMatch(s -> s.getEmail() != null && s.getEmail().equalsIgnoreCase(chiave));
         if (!esiste) {
