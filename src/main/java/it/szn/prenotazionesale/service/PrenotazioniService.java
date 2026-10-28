@@ -23,6 +23,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -154,8 +155,27 @@ public class PrenotazioniService {
 
         String salaOriginale = request.getSalaEmailOriginale();
 
-        // Se la sala \u00e8 cambiata, cancella dalla vecchia e crea sulla nuova
+
+        // Se la sala è cambiata, cancella dalla vecchia e crea sulla nuova
         if (salaOriginale != null && !salaOriginale.equals(request.getSalaEmail())) {
+            // Prevenzione Deadlock tramite Canonical Lock Ordering (ordinamento alfabetico)
+            String primaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? salaOriginale : request.getSalaEmail();
+            String secondaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? request.getSalaEmail() : salaOriginale;
+
+            ReentrantLock lock1 = getLockPerSala(primaSala);
+            ReentrantLock lock2 = getLockPerSala(secondaSala);
+
+            boolean lock1Acquired = false;
+            boolean lock2Acquired = false;
+            try {
+                lock1Acquired = lock1.tryLock(10, TimeUnit.SECONDS);
+                if (!lock1Acquired) {
+                    throw new IllegalStateException("Timeout nell'acquisizione del lock per la sala: " + primaSala);
+                }
+                lock2Acquired = lock2.tryLock(10, TimeUnit.SECONDS);
+                if (!lock2Acquired) {
+                    throw new IllegalStateException("Timeout nell'acquisizione del lock per la sala: " + secondaSala);
+                }
             log.info("Sala cambiata da {} a {}: creo il nuovo evento prima di cancellare il vecchio", salaOriginale,
                     request.getSalaEmail());
 
@@ -272,6 +292,13 @@ public class PrenotazioniService {
             }
 
             return nuovaPrenotazione;
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Operazione di cambio sala interrotta", ie);
+            } finally {
+                if (lock2Acquired) lock2.unlock();
+                if (lock1Acquired) lock1.unlock();
+            }
         }
 
         ReentrantLock lock = getLockPerSala(request.getSalaEmail());
