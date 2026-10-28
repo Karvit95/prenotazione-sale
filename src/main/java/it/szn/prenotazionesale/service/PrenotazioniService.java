@@ -4,6 +4,7 @@ import com.microsoft.graph.models.*;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
+import it.szn.prenotazionesale.config.AppConfig;
 import it.szn.prenotazionesale.model.SalaDTO;
 import jakarta.annotation.PreDestroy;
 import lombok.AllArgsConstructor;
@@ -35,6 +36,7 @@ public class PrenotazioniService {
 
     private final GraphServiceClient graphClient;
     private final SaleService saleService;
+    private final AppConfig appConfig;
 
     // Un lock per sala: serializza il blocco "verifica disponibilit\u00e0 + scrittura
     // evento"
@@ -729,8 +731,10 @@ public class PrenotazioniService {
         if (occorrenze.isEmpty()) return;
 
         // 2. Finestra temporale totale per la chiamata Graph API
-        LocalDateTime primoInizio = occorrenze.get(0)[0];
-        LocalDateTime ultimaFine = occorrenze.get(occorrenze.size() - 1)[1];
+        LocalDateTime startReq = LocalDateTime.parse(request.getStart().substring(0, 19));
+        LocalDateTime endReq = LocalDateTime.parse(request.getEnd().substring(0, 19));
+        LocalDateTime primoInizio = occorrenze.stream().map(o -> o[0]).min(LocalDateTime::compareTo).orElse(startReq);
+        LocalDateTime ultimaFine = occorrenze.stream().map(o -> o[1]).max(LocalDateTime::compareTo).orElse(endReq);
 
         DateTimeFormatter formatoFiltro = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
         String filtroInizio = primoInizio.toLocalDate().atStartOfDay().format(formatoFiltro);
@@ -785,8 +789,14 @@ public class PrenotazioniService {
     }
 
     private boolean isAdmin(Jwt jwt) {
+        if (jwt == null) {
+            return false;
+        }
         List<String> ruoli = jwt.getClaimAsStringList("roles");
-        return ruoli != null && ruoli.contains("RoomBooking.Admin");
+        String expectedRole = (appConfig != null && appConfig.getAdminRole() != null && !appConfig.getAdminRole().isBlank())
+                ? appConfig.getAdminRole()
+                : "RoomBooking.Admin";
+        return ruoli != null && ruoli.contains(expectedRole);
     }
 
     private ReentrantLock getLockPerSala(String salaEmail) {
@@ -814,15 +824,18 @@ public class PrenotazioniService {
         if (html == null || html.isEmpty()) {
             return html;
         }
-        String testo = html.replaceAll("<[^>]*>", "");
+        String testo = html.replaceAll("(?i)<br\\s*/?>", "\n")
+                           .replaceAll("(?i)</p>", "\n")
+                           .replaceAll("(?i)</div>", "\n");
+        while (testo.matches("(?s).*<[^>]*>.*")) {
+            testo = testo.replaceAll("<[^>]*>", "");
+        }
         testo = testo.replace("\u00a0", " ");
         testo = testo.replace("&nbsp;", " ");
         testo = testo.replace("&amp;", "&");
-        testo = testo.replace("&lt;", "<");
-        testo = testo.replace("&gt;", ">");
         testo = testo.replace("&quot;", "\"");
         testo = testo.replace("&#39;", "'");
-        testo = testo.replaceAll("\\s+", " ").trim();
+        testo = testo.replaceAll("[ \\t\\x0B\\f]+", " ").trim();
         return testo.isEmpty() ? null : testo;
     }
     
@@ -832,7 +845,11 @@ public class PrenotazioniService {
         LocalDateTime end = LocalDateTime.parse(request.getEnd());
         
         // Se \u00e8 un evento singolo, restituisce solo l'unica occorrenza
-        if (request.getPattern() == null || request.getPattern().isBlank()) {
+        if ("SINGOLA".equalsIgnoreCase(request.getTipoModifica())
+                || request.getPattern() == null 
+                || request.getPattern().isBlank()
+                || request.getDataFine() == null 
+                || request.getDataFine().isBlank()) {
             occorrenze.add(new LocalDateTime[]{start, end});
             return occorrenze;
         }
@@ -863,8 +880,13 @@ public class PrenotazioniService {
                 }
                 break;
             case "monthly":
-                for (LocalDate d = start.toLocalDate(); !d.isAfter(dataFine); d = d.plusMonths(interval)) {
+                LocalDate baseDate = start.toLocalDate();
+                int monthStep = 0;
+                while (true) {
+                    LocalDate d = baseDate.plusMonths((long) monthStep * interval);
+                    if (d.isAfter(dataFine)) break;
                     occorrenze.add(new LocalDateTime[]{d.atTime(start.toLocalTime()), d.atTime(start.toLocalTime()).plusMinutes(durationMinutes)});
+                    monthStep++;
                 }
                 break;
         }
