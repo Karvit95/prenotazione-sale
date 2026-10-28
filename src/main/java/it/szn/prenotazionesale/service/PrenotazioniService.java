@@ -289,28 +289,26 @@ public class PrenotazioniService {
                 nuovaPrenotazione = creaPrenotazione(request, jwt);
             }
 
-            try {
-                // Stessa logica delle altre operazioni sulle serie: se la modifica riguarda
-                // tutta la serie e abbiamo il seriesMasterId, va cancellato quello \u2014 non
-                // l'ID dell'occorrenza cliccata, altrimenti resterebbero attive le altre
-                // occorrenze della vecchia serie sulla sala originale.
-                String idDaCancellare = (modificaSerie && haSeriesMaster)
+            String idDaCancellare = (modificaSerie && haSeriesMaster)
                                 ? request.getSeriesMasterId()
                                 : eventId;
 
-                cancellaPrenotazione(idDaCancellare, salaOriginale, jwt);
-            } catch (Exception e) {
-                log.error(
-                        "Prenotazione spostata con ID nuovo {} ma impossibile cancellare l'evento originale {} sulla sala {}: rimane una prenotazione duplicata da rimuovere manualmente",
-                        nuovaPrenotazione.getId(), eventId, salaOriginale, e);
-                throw new IllegalStateException("La prenotazione \u00e8 stata creata sulla nuova sala (ID "
-                        + nuovaPrenotazione.getId()
-                        + "), ma non \u00e8 stato possibile rimuovere quella originale sulla sala precedente (ID " + eventId
-                        + "). Contatta l'amministratore IT per la cancellazione manuale della vecchia prenotazione.",
-                        e);
-            }
+            try {
+                graphClient.users().byUserId(salaOriginale).events().byEventId(idDaCancellare).delete();
+                } catch (Exception e) {
+                    // Rollback compensativo: elimina il nuovo evento creato per evitare duplicati orfani
+                    log.error("Cancellazione evento originale {} su sala {} fallita. Tento rollback dell'evento creato {} su sala {}",
+                            idDaCancellare, salaOriginale, nuovaPrenotazione.getId(), request.getSalaEmail(), e);
+                    try {
+                        graphClient.users().byUserId(request.getSalaEmail()).events().byEventId(nuovaPrenotazione.getId()).delete();
+                        log.info("Rollback completato con successo: eliminato evento {}", nuovaPrenotazione.getId());
+                    } catch (Exception rollbackEx) {
+                        log.error("Rollback fallito per ID {}: {}", nuovaPrenotazione.getId(), rollbackEx.getMessage());
+                    }
+                    throw new IllegalStateException("Impossibile completare il cambio sala: cancellazione fallita sulla sala precedente.", e);
+                }
 
-            return nuovaPrenotazione;
+                return nuovaPrenotazione;
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Operazione di cambio sala interrotta", ie);
