@@ -134,17 +134,25 @@ public class PrenotazioniService {
         }
 
         ReentrantLock lock = getLockPerSala(request.getSalaEmail());
-        lock.lock();
-
+        boolean lockAcquired = false;
         try {
+            lockAcquired = lock.tryLock(10, TimeUnit.SECONDS);
+            if (!lockAcquired) {
+                throw new IllegalStateException("Timeout acquisizione lock per la sala: " + request.getSalaEmail());
+            }
             verificaDisponibilita(request, null, jwt);
             var event = buildEvent(request);
             var createdEvent = graphClient.users().byUserId(request.getSalaEmail()).calendar().events().post(event);
 
             log.info("Prenotazione creata con ID {}", createdEvent.getId());
             return mapToDTO(createdEvent, request.getSalaEmail(), jwt);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Operazione interrotta durante l'acquisizione del lock", ie);
         } finally {
-            lock.unlock();
+            if (lockAcquired) {
+                lock.unlock();
+            }
         }
     }
 
@@ -321,9 +329,12 @@ public class PrenotazioniService {
         }
 
         ReentrantLock lock = getLockPerSala(request.getSalaEmail());
-        lock.lock();
-
+        boolean lockAcquired = false;
         try {
+            lockAcquired = lock.tryLock(10, TimeUnit.SECONDS);
+            if (!lockAcquired) {
+                throw new IllegalStateException("Timeout acquisizione lock per la sala: " + request.getSalaEmail());
+            }
             // Determina se modificare la singola occorrenza o l'intera serie
             String tipoModifica = request.getTipoModifica();
             boolean modificaSerie = "SERIE".equals(tipoModifica);
@@ -446,10 +457,13 @@ public class PrenotazioniService {
                 return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
             }
 
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Operazione interrotta durante l'acquisizione del lock", ie);
         } finally {
-
-            lock.unlock();
-
+            if (lockAcquired) {
+                lock.unlock();
+            }
         }
     }
 
@@ -463,9 +477,13 @@ public class PrenotazioniService {
         verificaAdmin(jwt);
 
         ReentrantLock lock = getLockPerSala(salaEmail);
-        lock.lock();
-
+        boolean lockAcquired = false;
         try {
+            lockAcquired = lock.tryLock(10, TimeUnit.SECONDS);
+            if (!lockAcquired) {
+                throw new IllegalStateException("Timeout acquisizione lock per la sala: " + salaEmail);
+            }
+
             // In Graph, cancellare un'occorrenza singola o l'intera serie usa la STESSA
             // operazione (DELETE): cambia solo l'ID target. Passare l'ID del series master
             // cancella tutta la serie; passare l'ID di un'occorrenza cancella solo quella data.
@@ -478,8 +496,13 @@ public class PrenotazioniService {
             log.info("Prenotazione {} cancellata dalla sala {} (tipo richiesto: {})", idSuCuiOperare, salaEmail,
                     tipoCancellazione);
 
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Operazione interrotta durante l'acquisizione del lock", ie);
         } finally {
-            lock.unlock();
+            if (lockAcquired) {
+                lock.unlock();
+            }
         }
     }
 
