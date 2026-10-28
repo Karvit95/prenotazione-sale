@@ -780,7 +780,15 @@ public class PrenotazioniService {
     }
 
     private ReentrantLock getLockPerSala(String salaEmail) {
+        if (salaEmail == null || salaEmail.isBlank()) {
+            throw new IllegalArgumentException("L'email della sala non puo essere vuota.");
+        }
         String chiave = salaEmail.trim().toLowerCase();
+        boolean esiste = saleService.getSale().stream()
+                .anyMatch(s -> s.getEmail() != null && s.getEmail().equalsIgnoreCase(chiave));
+        if (!esiste) {
+            throw new IllegalArgumentException("La sala specificata non esiste: " + salaEmail);
+        }
         return lockPerSala.computeIfAbsent(chiave, k -> new ReentrantLock());
     }
 
