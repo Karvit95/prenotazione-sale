@@ -196,6 +196,25 @@ public class PrenotazioniService {
                 var masterOriginale = graphClient.users().byUserId(salaOriginale).events()
                         .byEventId(request.getSeriesMasterId()).get();
 
+                // Verifica disponibilità sulla sala di destinazione per tutta la serie prima di creare
+                PrenotazioneRequestDTO checkRequest = new PrenotazioneRequestDTO();
+                checkRequest.setSalaEmail(request.getSalaEmail());
+                checkRequest.setStart(masterOriginale.getStart().getDateTime());
+                checkRequest.setEnd(masterOriginale.getEnd().getDateTime());
+                if (masterOriginale.getRecurrence() != null && masterOriginale.getRecurrence().getPattern() != null) {
+                    var p = masterOriginale.getRecurrence().getPattern();
+                    checkRequest.setPattern(p.getType() != null ? p.getType().name().toLowerCase() : null);
+                    checkRequest.setIntervallo(p.getInterval());
+                    if (p.getDaysOfWeek() != null) {
+                        checkRequest.setGiorniSettimana(p.getDaysOfWeek().stream().map(Enum::name).collect(Collectors.toList()));
+                    }
+                }
+                if (masterOriginale.getRecurrence() != null && masterOriginale.getRecurrence().getRange() != null) {
+                    checkRequest.setDataFine(masterOriginale.getRecurrence().getRange().getEndDate() != null 
+                            ? masterOriginale.getRecurrence().getRange().getEndDate().toString() : null);
+                }
+                verificaDisponibilita(checkRequest, null, jwt);
+
                 // Costruisci il nuovo evento copiando i dati del master originale
                 var nuovoEvento = new Event();
                 nuovoEvento.setSubject(request.getTitolo());
