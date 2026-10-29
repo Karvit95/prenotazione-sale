@@ -7,6 +7,7 @@ import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
@@ -50,6 +51,7 @@ public class PrenotazioniController {
     }
 
     // POST /api/prenotazioni
+    @PreAuthorize("hasRole('RoomBooking.Admin')")
     @PostMapping
     public ResponseEntity<PrenotazioneDTO> creaPrenotazione(
             @Valid @RequestBody PrenotazioneRequestDTO request,
@@ -61,6 +63,7 @@ public class PrenotazioniController {
     }
 
     // PATCH /api/prenotazioni/{eventId}?salaEmail=...
+    @PreAuthorize("hasRole('RoomBooking.Admin')")
     @PatchMapping("/{eventId}")
     public ResponseEntity<PrenotazioneDTO> modificaPrenotazione(
             @PathVariable String eventId,
@@ -73,6 +76,7 @@ public class PrenotazioniController {
     }
 
     // DELETE /api/prenotazioni/{eventId}?salaEmail=...&tipoCancellazione=SERIE&seriesMasterId=...
+    @PreAuthorize("hasRole('RoomBooking.Admin')")
     @DeleteMapping("/{eventId}")
     public ResponseEntity<Void> cancellaPrenotazione(
             @PathVariable String eventId,

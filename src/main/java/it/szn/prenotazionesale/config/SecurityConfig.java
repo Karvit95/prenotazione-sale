@@ -32,6 +32,11 @@ public class SecurityConfig {
             .csrf(csrf -> csrf.disable())
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/prenotazioni/**").hasRole("RoomBooking.Admin")
+                .requestMatchers(HttpMethod.PATCH, "/api/prenotazioni/**").hasRole("RoomBooking.Admin")
+                .requestMatchers(HttpMethod.DELETE, "/api/prenotazioni/**").hasRole("RoomBooking.Admin")
+                .requestMatchers("/api/sale/**").authenticated()
+                .requestMatchers(HttpMethod.GET, "/api/prenotazioni/**").authenticated()
                 .anyRequest().authenticated()
             )
             .oauth2ResourceServer(oauth2 -> oauth2
