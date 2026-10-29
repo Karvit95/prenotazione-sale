@@ -1,0 +1,29 @@
+package it.szn.prenotazionesale.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import java.util.concurrent.ThreadPoolExecutor;
+
+@Configuration
+@EnableAsync
+public class AsyncConfig {
+
+    @Bean(name = "graphQueryExecutor")
+    public ThreadPoolTaskExecutor graphQueryExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(10);
+        executor.setMaxPoolSize(20);
+        executor.setQueueCapacity(40); // Bounded queue prevents OutOfMemoryError
+        executor.setKeepAliveSeconds(60);
+        executor.setThreadNamePrefix("graph-room-query-");
+        // CallerRunsPolicy provides backpressure under heavy traffic
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(30);
+        executor.initialize();
+        return executor;
+    }
+}
