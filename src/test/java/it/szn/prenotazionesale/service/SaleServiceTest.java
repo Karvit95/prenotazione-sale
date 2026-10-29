@@ -65,6 +65,31 @@ class SaleServiceTest {
     }
 
     @Test
+    @DisplayName("Dovrebbe utilizzare la cache in memoria alla seconda chiamata senza re-interrogare Graph")
+    void getSale_CacheUsedWithinTtl() {
+        // Arrange
+        Room room = new Room();
+        room.setId("room-id-1");
+        room.setDisplayName("Sala Pietro Dohrn");
+        room.setEmailAddress("dohrn@szn.it");
+
+        RoomCollectionResponse response = new RoomCollectionResponse();
+        response.setValue(List.of(room));
+
+        when(graphClient.places().graphRoom().get()).thenReturn(response);
+
+        // Act
+        List<SalaDTO> primaChiamata = saleService.getSale();
+        List<SalaDTO> secondaChiamata = saleService.getSale();
+
+        // Assert
+        assertThat(primaChiamata).isNotNull().hasSize(1);
+        assertThat(secondaChiamata).isNotNull().hasSize(1);
+        // Graph deve essere stato chiamato 1 sola volta
+        verify(graphClient.places().graphRoom(), times(1)).get();
+    }
+
+    @Test
     @DisplayName("Dovrebbe restituire una lista vuota se Microsoft Graph non restituisce alcuna sala")
     void getSale_EmptyList() {
         // Arrange
