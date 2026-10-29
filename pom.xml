@@ -51,6 +51,18 @@
 			<version>6.4.0</version>
 		</dependency>
 
+		<!-- Kiota Http OkHttp & Azure Auth (necessari per OkHttpClient custom con timeout) -->
+		<dependency>
+			<groupId>com.microsoft.kiota</groupId>
+			<artifactId>microsoft-kiota-http-okHttp</artifactId>
+			<version>1.0.4</version>
+		</dependency>
+		<dependency>
+			<groupId>com.microsoft.kiota</groupId>
+			<artifactId>microsoft-kiota-authentication-azure</artifactId>
+			<version>1.0.4</version>
+		</dependency>
+
 		<!-- Azure Identity (client credentials flow) -->
 		<dependency>
 			<groupId>com.azure</groupId>

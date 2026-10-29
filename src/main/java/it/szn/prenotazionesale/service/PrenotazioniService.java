@@ -10,6 +10,8 @@ import jakarta.annotation.PreDestroy;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
@@ -40,13 +42,13 @@ import java.util.stream.Collectors;
  * - Sincronizzazione thread-safe per singola sala tramite lock rientranti con timeout.
  */
 @Slf4j
-@AllArgsConstructor
 @Service
 public class PrenotazioniService {
 
     private final GraphServiceClient graphClient;
     private final SaleService saleService;
     private final AppConfig appConfig;
+    private final ThreadPoolTaskExecutor executorGraphParallelo;
 
     /**
      * Mappa dei lock rientranti per singola sala.
@@ -56,20 +58,15 @@ public class PrenotazioniService {
      */
     private final ConcurrentHashMap<String, ReentrantLock> lockPerSala = new ConcurrentHashMap<>();
 
-    /**
-     * Thread pool dedicato alle interrogazioni parallele verso Microsoft Graph per il recupero
-     * simultaneo degli eventi di tutte le sale (getPrenotazioniTutteSale).
-     * Trattandosi di operazioni I/O-bound (chiamate HTTP remote), utilizza un pool dimensionato
-     * per evitare colli di bottiglia o saturazione del pool principale dell'applicazione.
-     */
-    private final ExecutorService executorGraphParallelo = Executors.newFixedThreadPool(20);
-
-    /**
-     * Rilascia le risorse dell'executor dedicato in fase di arresto del contesto applicativo.
-     */
-    @PreDestroy
-    public void shutdown() {
-        executorGraphParallelo.shutdown();
+    public PrenotazioniService(
+            GraphServiceClient graphClient,
+            SaleService saleService,
+            AppConfig appConfig,
+            @Qualifier("graphQueryExecutor") ThreadPoolTaskExecutor executorGraphParallelo) {
+        this.graphClient = graphClient;
+        this.saleService = saleService;
+        this.appConfig = appConfig;
+        this.executorGraphParallelo = executorGraphParallelo;
     }
 
     /**
