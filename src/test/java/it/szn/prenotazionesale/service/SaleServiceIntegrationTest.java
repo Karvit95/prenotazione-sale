@@ -3,6 +3,7 @@ package it.szn.prenotazionesale.service;
 import com.microsoft.graph.models.Room;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
 import it.szn.prenotazionesale.model.SalaDTO;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,6 +12,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import java.util.List;
 
 @SpringBootTest
+@Disabled("Test di integrazione manuale che richiede connessione remota con secret Azure valido")
 class SaleServiceIntegrationTest {
 
     @Autowired

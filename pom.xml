@@ -63,6 +63,13 @@
 			<version>1.0.4</version>
 		</dependency>
 
+		<!-- Azure Core compatibile con azure-identity:1.13.0 -->
+		<dependency>
+			<groupId>com.azure</groupId>
+			<artifactId>azure-core</artifactId>
+			<version>1.49.1</version>
+		</dependency>
+
 		<!-- Azure Identity (client credentials flow) -->
 		<dependency>
 			<groupId>com.azure</groupId>
