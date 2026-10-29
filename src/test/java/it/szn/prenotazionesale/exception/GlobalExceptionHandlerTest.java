@@ -22,6 +22,8 @@ class GlobalExceptionHandlerTest {
     }
 
     private static class MockApiException extends ApiException {
+        private static final long serialVersionUID = 1L;
+
         public MockApiException(int statusCode, ResponseHeaders headers) {
             super("API Exception: " + statusCode);
             setResponseStatusCode(statusCode);
@@ -39,8 +41,10 @@ class GlobalExceptionHandlerTest {
 
         assertEquals(HttpStatus.TOO_MANY_REQUESTS, response.getStatusCode());
         assertEquals("12", response.getHeaders().getFirst("Retry-After"));
-        assertNotNull(response.getBody());
-        assertTrue(response.getBody().getMessage().contains("12 secondi"));
+        
+        ErrorResponse body = response.getBody();
+        assertNotNull(body);
+        assertTrue(body.getMessage().contains("12 secondi"));
     }
 
     @Test
@@ -50,8 +54,10 @@ class GlobalExceptionHandlerTest {
         ResponseEntity<ErrorResponse> response = handler.handleGraphApiException(ex);
 
         assertEquals(HttpStatus.BAD_GATEWAY, response.getStatusCode());
-        assertNotNull(response.getBody());
-        assertTrue(response.getBody().getMessage().contains("Errore di comunicazione"));
+        
+        ErrorResponse body = response.getBody();
+        assertNotNull(body);
+        assertTrue(body.getMessage().contains("Errore di comunicazione"));
     }
 
     @Test
@@ -75,8 +81,9 @@ class GlobalExceptionHandlerTest {
         ResponseEntity<ErrorResponse> response = handler.handleCompletionException(ex);
 
         assertEquals(HttpStatus.GATEWAY_TIMEOUT, response.getStatusCode());
-        assertNotNull(response.getBody());
-        assertTrue(response.getBody().getMessage().contains("scaduta"));
+        
+        ErrorResponse body = response.getBody();
+        assertNotNull(body);
+        assertTrue(body.getMessage().contains("scaduta"));
     }
 }
-

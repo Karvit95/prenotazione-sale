@@ -7,8 +7,6 @@ import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
 import it.szn.prenotazionesale.config.AppConfig;
 import it.szn.prenotazionesale.model.SalaDTO;
-import jakarta.annotation.PreDestroy;
-import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -22,11 +20,10 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
@@ -36,11 +33,16 @@ import java.util.stream.Collectors;
  * Servizio per la gestione operativa delle prenotazioni delle sale riunioni.
  * Interagisce con Microsoft 365 Exchange Online tramite le API Microsoft Graph.
  *
- * ResponsabilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  principali:
- * - Consultazione degli eventi e delle disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  (tramite calendarView per espansione ricorrenze).
- * - Creazione, aggiornamento e cancellazione di prenotazioni singole e serie ricorrenti.
- * - Migrazione atomica di eventi tra sale diverse (cambio sala) con logica di rollback compensativo.
- * - Sincronizzazione thread-safe per singola sala tramite lock rientranti con timeout.
+ * ResponsabilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  principali:
+ * - Consultazione degli eventi e delle
+ * disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  (tramite calendarView
+ * per espansione ricorrenze).
+ * - Creazione, aggiornamento e cancellazione di prenotazioni singole e serie
+ * ricorrenti.
+ * - Migrazione atomica di eventi tra sale diverse (cambio sala) con logica di
+ * rollback compensativo.
+ * - Sincronizzazione thread-safe per singola sala tramite lock rientranti con
+ * timeout.
  */
 @Slf4j
 @Service
@@ -53,9 +55,13 @@ public class PrenotazioniService {
 
     /**
      * Mappa dei lock rientranti per singola sala.
-     * Serializza le operazioni di verifica disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  e successiva scrittura su Microsoft Graph
-     * per la medesima sala, prevenendo race condition da prenotazioni simultanee sovrapposte (TOCTOU).
-     * Ogni lock opera in memoria locale con timeout per prevenire blocchi indefiniti dei thread.
+     * Serializza le operazioni di verifica
+     * disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  e successiva scrittura
+     * su Microsoft Graph
+     * per la medesima sala, prevenendo race condition da prenotazioni simultanee
+     * sovrapposte (TOCTOU).
+     * Ogni lock opera in memoria locale con timeout per prevenire blocchi
+     * indefiniti dei thread.
      */
     private final ConcurrentHashMap<String, ReentrantLock> lockPerSala = new ConcurrentHashMap<>();
 
@@ -71,33 +77,45 @@ public class PrenotazioniService {
     }
 
     /**
-     * Pattern per la validazione delle stringhe di data/ora impiegate nei filtri OData di Microsoft Graph.
-     * Ammette sia il formato ISO-8601 UTC (con 'Z' o offset) che il formato ISO locale senza offset,
-     * bloccando caratteri non consentiti per prevenire injection di sintassi OData non controllata.
+     * Pattern per la validazione delle stringhe di data/ora impiegate nei filtri
+     * OData di Microsoft Graph.
+     * Ammette sia il formato ISO-8601 UTC (con 'Z' o offset) che il formato ISO
+     * locale senza offset,
+     * bloccando caratteri non consentiti per prevenire injection di sintassi OData
+     * non controllata.
      */
     private static final Pattern PATTERN_DATA_FILTRO = Pattern.compile(
             "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?(Z|[+-]\\d{2}:\\d{2})?$");
 
     /**
-     * Verifica che una stringa temporale rispetti il formato ISO-8601 consentito per i filtri Graph.
+     * Verifica che una stringa temporale rispetti il formato ISO-8601 consentito
+     * per i filtri Graph.
      */
     private void validaParametroFiltroData(String valore, String nomeParametro) {
         if (valore == null || !PATTERN_DATA_FILTRO.matcher(valore).matches()) {
-            log.warn("Parametro '{}' rifiutato per il filtro prenotazioni: valore non conforme al formato atteso", nomeParametro);
+            log.warn("Parametro '{}' rifiutato per il filtro prenotazioni: valore non conforme al formato atteso",
+                    nomeParametro);
             throw new IllegalArgumentException(
-                    "Errore: il parametro '" + nomeParametro + "' deve essere una data/ora in formato ISO-8601 valido.");
+                    "Errore: il parametro '" + nomeParametro
+                            + "' deve essere una data/ora in formato ISO-8601 valido.");
         }
     }
 
     /**
-     * Recupera le prenotazioni confermate per una specifica sala nell'intervallo temporale richiesto.
-     * Utilizza l'endpoint calendarView di Microsoft Graph per espandere automaticamente tutte
-     * le occorrenze delle serie ricorrenti nel periodo indicato, convertite nel fuso Europe/Rome.
+     * Recupera le prenotazioni confermate per una specifica sala nell'intervallo
+     * temporale richiesto.
+     * Utilizza l'endpoint calendarView di Microsoft Graph per espandere
+     * automaticamente tutte
+     * le occorrenze delle serie ricorrenti nel periodo indicato, convertite nel
+     * fuso Europe/Rome.
      *
-     * @param salaEmail indirizzo email della casella di sala Exchange
-     * @param dataInizio estremo inferiore dell'intervallo temporale (formato ISO-8601)
-     * @param dataFine estremo superiore dell'intervallo temporale (formato ISO-8601)
-     * @param jwt token JWT del chiamante per la verifica dei privilegi di modifica
+     * @param salaEmail  indirizzo email della casella di sala Exchange
+     * @param dataInizio estremo inferiore dell'intervallo temporale (formato
+     *                   ISO-8601)
+     * @param dataFine   estremo superiore dell'intervallo temporale (formato
+     *                   ISO-8601)
+     * @param jwt        token JWT del chiamante per la verifica dei privilegi di
+     *                   modifica
      * @return lista delle prenotazioni presenti nel periodo
      */
     public List<PrenotazioneDTO> getPrenotazioni(String salaEmail, String dataInizio, String dataFine, Jwt jwt) {
@@ -118,13 +136,15 @@ public class PrenotazioniService {
     }
 
     /**
-     * Recupera in parallelo le prenotazioni di tutte le sale gestite nell'intervallo specificato.
-     * Esegue chiamate asincrone concorrenti su pool dedicato per ottimizzare i tempi di risposta,
+     * Recupera in parallelo le prenotazioni di tutte le sale gestite
+     * nell'intervallo specificato.
+     * Esegue chiamate asincrone concorrenti su pool dedicato per ottimizzare i
+     * tempi di risposta,
      * aggregando infine tutti gli eventi in una singola lista unificata.
      *
      * @param dataInizio estremo inferiore dell'intervallo temporale
-     * @param dataFine estremo superiore dell'intervallo temporale
-     * @param jwt token JWT del chiamante
+     * @param dataFine   estremo superiore dell'intervallo temporale
+     * @param jwt        token JWT del chiamante
      * @return lista complessiva delle prenotazioni di tutte le sale
      */
     public List<PrenotazioneDTO> getPrenotazioniTutteSale(String dataInizio, String dataFine, Jwt jwt) {
@@ -136,29 +156,33 @@ public class PrenotazioniService {
                     try {
                         return getPrenotazioni(sala.getEmail(), dataInizio, dataFine, jwt);
                     } catch (ApiException e) {
-                        log.error("Errore Graph API (status {}) per sala {}: {}", e.getResponseStatusCode(), sala.getEmail(), e.getMessage());
+                        log.error("Errore Graph API (status {}) per sala {}: {}", e.getResponseStatusCode(),
+                                sala.getEmail(), e.getMessage());
                         throw e;
                     } catch (Exception e) {
                         log.error("Errore recupero prenotazioni per sala {}: {}", sala.getEmail(), e.getMessage(), e);
-                        throw new RuntimeException("Errore recupero prenotazioni per sala " + sala.getNome() + ": " + e.getMessage(), e);
+                        throw new RuntimeException(
+                                "Errore recupero prenotazioni per sala " + sala.getNome() + ": " + e.getMessage(), e);
                     }
                 }, executorGraphParallelo)
-                .orTimeout(12, TimeUnit.SECONDS))
+                        .orTimeout(12, TimeUnit.SECONDS))
                 .collect(Collectors.toList());
 
         return futures.stream()
-                .map(CompletableFuture::join)
-                .flatMap(List::stream)
+                .map(f -> f.join())
+                .flatMap(list -> list.stream())
                 .collect(Collectors.toList());
     }
 
     /**
      * Crea una nuova prenotazione (singola o serie ricorrente) per una sala.
-     * L'operazione acquisisce il lock esclusivo sulla sala target con timeout di 10 secondi,
-     * verifica l'assenza di sovrapposizioni orarie e registra l'evento su Microsoft Graph.
+     * L'operazione acquisisce il lock esclusivo sulla sala target con timeout di 10
+     * secondi,
+     * verifica l'assenza di sovrapposizioni orarie e registra l'evento su Microsoft
+     * Graph.
      *
      * @param request dati della prenotazione da creare
-     * @param jwt token JWT autenticato per il controllo di autorizzazione admin
+     * @param jwt     token JWT autenticato per il controllo di autorizzazione admin
      * @return DTO dell'evento creato
      */
     public PrenotazioneDTO creaPrenotazione(PrenotazioneRequestDTO request, Jwt jwt) {
@@ -194,23 +218,31 @@ public class PrenotazioniService {
     }
 
     /**
-     * Modifica una prenotazione esistente, gestendo sia l'aggiornamento all'interno della stessa sala
+     * Modifica una prenotazione esistente, gestendo sia l'aggiornamento all'interno
+     * della stessa sala
      * sia la migrazione su una sala differente (cambio sala).
      *
      * In caso di Cambio Sala:
-     * - Acquisisce i lock di entrambe le sale in ordine lessicografico per evitare deadlock.
-     * - Crea il nuovo evento nella sala di destinazione (duplicando la serie dal master per gli eventi ricorrenti).
+     * - Acquisisce i lock di entrambe le sale in ordine lessicografico per evitare
+     * deadlock.
+     * - Crea il nuovo evento nella sala di destinazione (duplicando la serie dal
+     * master per gli eventi ricorrenti).
      * - Cancella il vecchio evento dalla sala di origine.
-     * - Se la cancellazione fallisce, esegue un rollback compensativo rimuovendo il nuovo evento creato.
+     * - Se la cancellazione fallisce, esegue un rollback compensativo rimuovendo il
+     * nuovo evento creato.
      *
      * In caso di Modifica sulla Stessa Sala:
-     * - Per le serie ricorrenti, aggiorna il Series Master preservando start ed end se l'orario non ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ variato,
-     *   cosÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ da mantenere intatte le singole eccezioni giÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  configurate nella serie.
-     * - Per le singole occorrenze, aggiorna i dati specifici della data selezionata.
+     * - Per le serie ricorrenti, aggiorna il Series Master preservando start ed end
+     * se l'orario non ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ variato,
+     * cosÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ da mantenere intatte le singole
+     * eccezioni giÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  configurate nella
+     * serie.
+     * - Per le singole occorrenze, aggiorna i dati specifici della data
+     * selezionata.
      *
      * @param eventId identificativo univoco dell'evento o occorrenza su Graph
      * @param request payload con i dettagli aggiornati della prenotazione
-     * @param jwt token JWT autenticato per il controllo privilegi
+     * @param jwt     token JWT autenticato per il controllo privilegi
      * @return DTO dell'evento aggiornato
      */
     public PrenotazioneDTO modificaPrenotazione(String eventId, PrenotazioneRequestDTO request, Jwt jwt) {
@@ -222,9 +254,12 @@ public class PrenotazioniService {
 
         // Ramo 1: Cambio sala (migrazione tra due caselle Exchange distinte)
         if (salaOriginale != null && !salaOriginale.equals(request.getSalaEmail())) {
-            // Ordinamento lessicografico dei lock delle due sale per scongiurare deadlock tra richieste concorrenti
-            String primaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? salaOriginale : request.getSalaEmail();
-            String secondaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? request.getSalaEmail() : salaOriginale;
+            // Ordinamento lessicografico dei lock delle due sale per scongiurare deadlock
+            // tra richieste concorrenti
+            String primaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? salaOriginale
+                    : request.getSalaEmail();
+            String secondaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? request.getSalaEmail()
+                    : salaOriginale;
 
             ReentrantLock lock1 = getLockPerSala(primaSala);
             ReentrantLock lock2 = getLockPerSala(secondaSala);
@@ -249,7 +284,8 @@ public class PrenotazioniService {
                 PrenotazioneDTO nuovaPrenotazione;
 
                 if (modificaSerie && haSeriesMaster) {
-                    // Cambio sala su intera serie: recupera il master originale per clonarne orari, pattern e range
+                    // Cambio sala su intera serie: recupera il master originale per clonarne orari,
+                    // pattern e range
                     log.info("Modifica serie su cambio sala: recupero master originale ID {} dalla sala {}",
                             request.getSeriesMasterId(), salaOriginale);
 
@@ -258,22 +294,27 @@ public class PrenotazioniService {
                                 req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
                             });
 
-                    // Verifica preliminare di disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  della sala di destinazione per l'intera durata della serie
+                    // Verifica preliminare di
+                    // disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  della sala di
+                    // destinazione per l'intera durata della serie
                     PrenotazioneRequestDTO checkRequest = new PrenotazioneRequestDTO();
                     checkRequest.setSalaEmail(request.getSalaEmail());
                     checkRequest.setStart(masterOriginale.getStart().getDateTime());
                     checkRequest.setEnd(masterOriginale.getEnd().getDateTime());
-                    if (masterOriginale.getRecurrence() != null && masterOriginale.getRecurrence().getPattern() != null) {
+                    if (masterOriginale.getRecurrence() != null
+                            && masterOriginale.getRecurrence().getPattern() != null) {
                         var p = masterOriginale.getRecurrence().getPattern();
                         checkRequest.setPattern(p.getType() != null ? p.getType().name().toLowerCase() : null);
                         checkRequest.setIntervallo(p.getInterval());
                         if (p.getDaysOfWeek() != null) {
-                            checkRequest.setGiorniSettimana(p.getDaysOfWeek().stream().map(Enum::name).collect(Collectors.toList()));
+                            checkRequest.setGiorniSettimana(
+                                    p.getDaysOfWeek().stream().map(d -> d.name()).collect(Collectors.toList()));
                         }
                     }
                     if (masterOriginale.getRecurrence() != null && masterOriginale.getRecurrence().getRange() != null) {
-                        checkRequest.setDataFine(masterOriginale.getRecurrence().getRange().getEndDate() != null 
-                                ? masterOriginale.getRecurrence().getRange().getEndDate().toString() : null);
+                        checkRequest.setDataFine(masterOriginale.getRecurrence().getRange().getEndDate() != null
+                                ? masterOriginale.getRecurrence().getRange().getEndDate().toString()
+                                : null);
                     }
                     verificaDisponibilita(checkRequest, null, jwt);
 
@@ -333,7 +374,8 @@ public class PrenotazioniService {
 
                     nuovaPrenotazione = mapToDTO(createdEvent, request.getSalaEmail(), jwt);
                 } else if (!modificaSerie && haSeriesMaster) {
-                    // Cambio sala su singola occorrenza: genera un evento singolo non ricorrente nella nuova sala
+                    // Cambio sala su singola occorrenza: genera un evento singolo non ricorrente
+                    // nella nuova sala
                     nuovaPrenotazione = creaPrenotazione(request, jwt);
                 } else {
                     // Evento singolo standard: crea la prenotazione nella nuova sala
@@ -341,22 +383,26 @@ public class PrenotazioniService {
                 }
 
                 String idDaCancellare = (modificaSerie && haSeriesMaster)
-                                    ? request.getSeriesMasterId()
-                                    : eventId;
+                        ? request.getSeriesMasterId()
+                        : eventId;
 
                 try {
                     graphClient.users().byUserId(salaOriginale).events().byEventId(idDaCancellare).delete();
                 } catch (Exception e) {
-                    // Rollback compensativo: elimina l'evento appena creato per evitare la persistenza di duplicati
-                    log.error("Cancellazione evento originale {} su sala {} fallita. Tento rollback dell'evento creato {} su sala {}",
+                    // Rollback compensativo: elimina l'evento appena creato per evitare la
+                    // persistenza di duplicati
+                    log.error(
+                            "Cancellazione evento originale {} su sala {} fallita. Tento rollback dell'evento creato {} su sala {}",
                             idDaCancellare, salaOriginale, nuovaPrenotazione.getId(), request.getSalaEmail(), e);
                     try {
-                        graphClient.users().byUserId(request.getSalaEmail()).events().byEventId(nuovaPrenotazione.getId()).delete();
+                        graphClient.users().byUserId(request.getSalaEmail()).events()
+                                .byEventId(nuovaPrenotazione.getId()).delete();
                         log.info("Rollback completato con successo: eliminato evento {}", nuovaPrenotazione.getId());
                     } catch (Exception rollbackEx) {
                         log.error("Rollback fallito per ID {}: {}", nuovaPrenotazione.getId(), rollbackEx.getMessage());
                     }
-                    throw new IllegalStateException("Impossibile completare il cambio sala: cancellazione fallita sulla sala precedente.", e);
+                    throw new IllegalStateException(
+                            "Impossibile completare il cambio sala: cancellazione fallita sulla sala precedente.", e);
                 }
 
                 return nuovaPrenotazione;
@@ -364,8 +410,10 @@ public class PrenotazioniService {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Operazione di cambio sala interrotta", ie);
             } finally {
-                if (lock2Acquired) lock2.unlock();
-                if (lock1Acquired) lock1.unlock();
+                if (lock2Acquired)
+                    lock2.unlock();
+                if (lock1Acquired)
+                    lock1.unlock();
             }
         }
 
@@ -381,9 +429,13 @@ public class PrenotazioniService {
             String tipoModifica = request.getTipoModifica();
             boolean modificaSerie = "SERIE".equals(tipoModifica);
 
-            // Esclude dal controllo di disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  l'evento stesso o il master della serie in modifica
-            String seriesMasterIdDaEscludere = modificaSerie 
-                    ? ((request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank()) ? request.getSeriesMasterId() : eventId)
+            // Esclude dal controllo di
+            // disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  l'evento stesso o il
+            // master della serie in modifica
+            String seriesMasterIdDaEscludere = modificaSerie
+                    ? ((request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank())
+                            ? request.getSeriesMasterId()
+                            : eventId)
                     : null;
             verificaDisponibilita(request, eventId, seriesMasterIdDaEscludere, jwt);
 
@@ -408,7 +460,8 @@ public class PrenotazioniService {
                 boolean orarioModificato = true;
 
                 try {
-                    // Recupera il master per preservarne la data d'inizio originale calcolando il nuovo orario giornaliero
+                    // Recupera il master per preservarne la data d'inizio originale calcolando il
+                    // nuovo orario giornaliero
                     var existingMaster = graphClient.users().byUserId(request.getSalaEmail()).events()
                             .byEventId(idSuCuiOperare).get(req -> {
                                 req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
@@ -427,17 +480,23 @@ public class PrenotazioniService {
                             .plusMinutes(durataMinuti);
                     nuovoEndDateTime = nuovoEndLDT.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
 
-                    // Se l'orario ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ invariato (solo titolo o descrizione modificati), non invia start/end
-                    // nel PATCH per preservare eventuali eccezioni di date giÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  modificate nella serie
-                    String masterStartOriginale = existingMaster.getStart() != null ? existingMaster.getStart().getDateTime() : "";
-                    if (masterStartOriginale.length() >= 19 && masterStartOriginale.substring(11, 19).equals(nuovoOrario)) {
+                    // Se l'orario ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ invariato (solo titolo
+                    // o descrizione modificati), non invia start/end
+                    // nel PATCH per preservare eventuali eccezioni di date
+                    // giÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  modificate nella serie
+                    String masterStartOriginale = existingMaster.getStart() != null
+                            ? existingMaster.getStart().getDateTime()
+                            : "";
+                    if (masterStartOriginale.length() >= 19
+                            && masterStartOriginale.substring(11, 19).equals(nuovoOrario)) {
                         orarioModificato = false;
                     }
 
                     log.debug("Modifica SERIE: data master {} con orario {} -> start={}, end={}, orarioModificato={}",
                             dataOriginaleMaster, nuovoOrario, nuovoStartDateTime, nuovoEndDateTime, orarioModificato);
                 } catch (Exception e) {
-                    log.warn("Impossibile recuperare il master per preservare la data originale, uso i valori della request: {}",
+                    log.warn(
+                            "Impossibile recuperare il master per preservare la data originale, uso i valori della request: {}",
                             e.getMessage());
                     nuovoStartDateTime = request.getStart();
                     nuovoEndDateTime = request.getEnd();
@@ -460,7 +519,8 @@ public class PrenotazioniService {
                 log.info("Prenotazione (serie, ID {}) modificata con successo", idSuCuiOperare);
                 return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
             } else {
-                // Aggiornamento della singola occorrenza: aggiorna solo i dettagli di questa specifica istanza
+                // Aggiornamento della singola occorrenza: aggiorna solo i dettagli di questa
+                // specifica istanza
                 var event = new Event();
                 event.setSubject(request.getTitolo());
 
@@ -499,7 +559,8 @@ public class PrenotazioniService {
 
     /**
      * Cancella una prenotazione o una serie ricorrente.
-     * Overload di comoditÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  per default tipo 'SERIE'.
+     * Overload di comoditÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  per default
+     * tipo 'SERIE'.
      */
     public void cancellaPrenotazione(String eventId, String salaEmail, Jwt jwt) {
         cancellaPrenotazione(eventId, salaEmail, "SERIE", null, jwt);
@@ -507,16 +568,19 @@ public class PrenotazioniService {
 
     /**
      * Cancella una prenotazione o una serie ricorrente dal calendario Exchange.
-     * Per una serie ricorrente completa, elimina il series master (rimuovendo l'intera pianificazione);
-     * per una singola occorrenza, elimina esclusivamente l'evento della data indicata.
+     * Per una serie ricorrente completa, elimina il series master (rimuovendo
+     * l'intera pianificazione);
+     * per una singola occorrenza, elimina esclusivamente l'evento della data
+     * indicata.
      *
-     * @param eventId identificativo dell'evento o dell'occorrenza
-     * @param salaEmail email della casella di sala
+     * @param eventId           identificativo dell'evento o dell'occorrenza
+     * @param salaEmail         email della casella di sala
      * @param tipoCancellazione "SERIE" o "SINGOLA"
-     * @param seriesMasterId identificativo del master della serie se disponibile
-     * @param jwt token JWT autenticato per il controllo privilegi
+     * @param seriesMasterId    identificativo del master della serie se disponibile
+     * @param jwt               token JWT autenticato per il controllo privilegi
      */
-    public void cancellaPrenotazione(String eventId, String salaEmail, String tipoCancellazione, String seriesMasterId, Jwt jwt) {
+    public void cancellaPrenotazione(String eventId, String salaEmail, String tipoCancellazione, String seriesMasterId,
+            Jwt jwt) {
         log.info("Cancellazione prenotazione ID {} per sala {} (tipo: {}, seriesMasterId: {})", eventId, salaEmail,
                 tipoCancellazione, seriesMasterId);
         verificaAdmin(jwt);
@@ -529,35 +593,48 @@ public class PrenotazioniService {
                 throw new IllegalStateException("Timeout acquisizione lock per la sala: " + salaEmail);
             }
 
-            String idSuCuiOperare = "SERIE".equals(tipoCancellazione) && seriesMasterId != null && !seriesMasterId.isBlank()
-                    ? seriesMasterId
-                    : eventId;
+            String idSuCuiOperare = "SERIE".equals(tipoCancellazione) && seriesMasterId != null
+                    && !seriesMasterId.isBlank()
+                            ? seriesMasterId
+                            : eventId;
 
-            // Recupera l'evento dalla sala per verificare se l'organizzatore ÃƒÂ¨ un utente esterno/Outlook
+            // Recupera l'evento dalla sala per verificare se l'organizzatore ÃƒÆ’Ã‚Â¨ un utente
+            // esterno/Outlook
             Event eventoDaCancellare = null;
             try {
-                eventoDaCancellare = graphClient.users().byUserId(salaEmail).events().byEventId(idSuCuiOperare).get(req -> {
-                    req.queryParameters.select = new String[]{"id", "isOrganizer", "organizer", "iCalUId", "seriesMasterId", "start", "end"};
-                });
+                eventoDaCancellare = graphClient.users().byUserId(salaEmail).events().byEventId(idSuCuiOperare)
+                        .get(req -> {
+                            req.queryParameters.select = new String[] { "id", "isOrganizer", "organizer", "iCalUId",
+                                    "seriesMasterId", "start", "end" };
+                        });
             } catch (Exception e) {
-                log.warn("Impossibile recuperare metadati preliminari dell'evento {} per sala {}: {}", idSuCuiOperare, salaEmail, e.getMessage());
+                log.warn("Impossibile recuperare metadati preliminari dell'evento {} per sala {}: {}", idSuCuiOperare,
+                        salaEmail, e.getMessage());
             }
 
             boolean cancellatoDaOrganizzatore = false;
             if (eventoDaCancellare != null) {
                 boolean isOrganizer = Boolean.TRUE.equals(eventoDaCancellare.getIsOrganizer());
-                String organizerEmail = (eventoDaCancellare.getOrganizer() != null && eventoDaCancellare.getOrganizer().getEmailAddress() != null)
-                        ? eventoDaCancellare.getOrganizer().getEmailAddress().getAddress()
-                        : null;
+                String organizerEmail = (eventoDaCancellare.getOrganizer() != null
+                        && eventoDaCancellare.getOrganizer().getEmailAddress() != null)
+                                ? eventoDaCancellare.getOrganizer().getEmailAddress().getAddress()
+                                : null;
                 String iCalUId = eventoDaCancellare.getICalUId();
 
-                // Se la sala non ÃƒÂ¨ l'organizzatore (evento creato da Outlook personale di un utente)
-                if (!isOrganizer && organizerEmail != null && !organizerEmail.equalsIgnoreCase(salaEmail) && iCalUId != null && !iCalUId.isBlank()) {
-                    log.info("L'evento {} appartiene al calendario personale di {} (iCalUId: {}). Rimozione alla radice.",
+                // Se la sala non ÃƒÆ’Ã‚Â¨ l'organizzatore (evento creato da Outlook personale di un
+                // utente)
+                if (!isOrganizer && organizerEmail != null && !organizerEmail.equalsIgnoreCase(salaEmail)
+                        && iCalUId != null && !iCalUId.isBlank()) {
+                    log.info(
+                            "L'evento {} appartiene al calendario personale di {} (iCalUId: {}). Rimozione alla radice.",
                             idSuCuiOperare, organizerEmail, iCalUId);
                     try {
-                        final String startIso = (eventoDaCancellare.getStart() != null) ? eventoDaCancellare.getStart().getDateTime() : null;
-                        final String endIso = (eventoDaCancellare.getEnd() != null) ? eventoDaCancellare.getEnd().getDateTime() : null;
+                        final String startIso = (eventoDaCancellare.getStart() != null)
+                                ? eventoDaCancellare.getStart().getDateTime()
+                                : null;
+                        final String endIso = (eventoDaCancellare.getEnd() != null)
+                                ? eventoDaCancellare.getEnd().getDateTime()
+                                : null;
                         final String finalICalUId = iCalUId;
 
                         List<Event> eventiOrganizzatore = null;
@@ -577,26 +654,31 @@ public class PrenotazioniService {
 
                         if (eventiOrganizzatore != null && !eventiOrganizzatore.isEmpty()) {
                             for (Event orgEvent : eventiOrganizzatore) {
-                                graphClient.users().byUserId(organizerEmail).events().byEventId(orgEvent.getId()).delete();
-                                log.info("Evento {} cancellato con successo dal calendario dell'organizzatore {}", orgEvent.getId(), organizerEmail);
+                                graphClient.users().byUserId(organizerEmail).events().byEventId(orgEvent.getId())
+                                        .delete();
+                                log.info("Evento {} cancellato con successo dal calendario dell'organizzatore {}",
+                                        orgEvent.getId(), organizerEmail);
                             }
                             cancellatoDaOrganizzatore = true;
                         }
                     } catch (Exception exOrg) {
-                        log.warn("Impossibile cancellare l'evento dal calendario dell'organizzatore {}: {}. Si procede con la rimozione diretta dalla sala.",
+                        log.warn(
+                                "Impossibile cancellare l'evento dal calendario dell'organizzatore {}: {}. Si procede con la rimozione diretta dalla sala.",
                                 organizerEmail, exOrg.getMessage());
                     }
                 }
             }
 
-            // Rimuove la copia dalla sala (se non giÃƒÂ  rimossa a catena da Exchange)
+            // Rimuove la copia dalla sala (se non giÃƒÆ’Ã‚Â  rimossa a catena da Exchange)
             try {
                 graphClient.users().byUserId(salaEmail).events().byEventId(idSuCuiOperare).delete();
                 log.info("Prenotazione {} cancellata dalla sala {} (tipo richiesto: {})", idSuCuiOperare, salaEmail,
                         tipoCancellazione);
             } catch (ApiException apiEx) {
                 if (apiEx.getResponseStatusCode() == 404 && cancellatoDaOrganizzatore) {
-                    log.info("L'evento {} della sala {} risulta giÃƒÂ  rimosso da Exchange in seguito alla cancellazione dell'organizzatore.", idSuCuiOperare, salaEmail);
+                    log.info(
+                            "L'evento {} della sala {} risulta giÃƒÆ’Ã‚Â  rimosso da Exchange in seguito alla cancellazione dell'organizzatore.",
+                            idSuCuiOperare, salaEmail);
                 } else {
                     throw apiEx;
                 }
@@ -615,8 +697,10 @@ public class PrenotazioniService {
     // --- Metodi privati di supporto ---
 
     /**
-     * Costruisce l'oggetto Event di Microsoft Graph popolando metadati, intervalli orari
-     * (con fuso orario fissato a Europe/Rome) ed eventuale regola di ricorrenza (Daily, Weekly, Monthly).
+     * Costruisce l'oggetto Event di Microsoft Graph popolando metadati, intervalli
+     * orari
+     * (con fuso orario fissato a Europe/Rome) ed eventuale regola di ricorrenza
+     * (Daily, Weekly, Monthly).
      */
     private Event buildEvent(PrenotazioneRequestDTO request) {
         log.debug("Costruzione evento: titolo={}, start={}, end={}", request.getTitolo(), request.getStart(),
@@ -703,7 +787,8 @@ public class PrenotazioniService {
 
     /**
      * Mappa un evento Microsoft Graph nel DTO applicativo per il frontend.
-     * Estrae identificativi di serie, ripulisce la descrizione da tag HTML e verifica i diritti di modifica.
+     * Estrae identificativi di serie, ripulisce la descrizione da tag HTML e
+     * verifica i diritti di modifica.
      */
     private PrenotazioneDTO mapToDTO(Event event, String salaEmail, Jwt jwt) {
         boolean isAdmin = isAdmin(jwt);
@@ -721,10 +806,17 @@ public class PrenotazioniService {
             RecurrencePatternType patternType = event.getRecurrence().getPattern().getType();
             if (patternType != null) {
                 switch (patternType) {
-                    case Daily: pattern = "daily"; break;
-                    case Weekly: pattern = "weekly"; break;
-                    case AbsoluteMonthly: pattern = "monthly"; break;
-                    default: pattern = patternType.toString().toLowerCase();
+                    case Daily:
+                        pattern = "daily";
+                        break;
+                    case Weekly:
+                        pattern = "weekly";
+                        break;
+                    case AbsoluteMonthly:
+                        pattern = "monthly";
+                        break;
+                    default:
+                        pattern = patternType.toString().toLowerCase();
                 }
             }
         }
@@ -750,7 +842,8 @@ public class PrenotazioniService {
     }
 
     /**
-     * Valida i vincoli di coerenza dei parametri di ricorrenza (tipo, data fine, intervallo, giorni selezionati).
+     * Valida i vincoli di coerenza dei parametri di ricorrenza (tipo, data fine,
+     * intervallo, giorni selezionati).
      */
     private void validaRicorrenza(PrenotazioneRequestDTO request) {
         String pattern = request.getPattern();
@@ -771,7 +864,8 @@ public class PrenotazioniService {
             LocalDate startDate = LocalDate.parse(request.getStart().substring(0, 10));
             LocalDate endDate = LocalDate.parse(request.getDataFine().substring(0, 10));
             if (endDate.isBefore(startDate)) {
-                log.warn("Validazione fallita: dataFine={} precedente a start={}", request.getDataFine(), request.getStart());
+                log.warn("Validazione fallita: dataFine={} precedente a start={}", request.getDataFine(),
+                        request.getStart());
                 throw new IllegalArgumentException(
                         "Errore: la data di fine ricorrenza deve essere successiva o uguale alla data di inizio.");
             }
@@ -781,7 +875,8 @@ public class PrenotazioniService {
             throw new IllegalArgumentException("Errore: formato data non valido per la ricorrenza.");
         }
 
-        if ("weekly".equalsIgnoreCase(pattern) && (request.getGiorniSettimana() == null || request.getGiorniSettimana().isEmpty())) {
+        if ("weekly".equalsIgnoreCase(pattern)
+                && (request.getGiorniSettimana() == null || request.getGiorniSettimana().isEmpty())) {
             throw new IllegalArgumentException("Per la ricorrenza settimanale devi selezionare almeno un giorno.");
         }
 
@@ -791,7 +886,8 @@ public class PrenotazioniService {
     }
 
     /**
-     * Valida che gli orari di inizio e fine rispettino il formato ISO-8601 e che l'inizio sia antecedente alla fine.
+     * Valida che gli orari di inizio e fine rispettino il formato ISO-8601 e che
+     * l'inizio sia antecedente alla fine.
      */
     private void validaOrariPrenotazione(String startStr, String endStr) {
         try {
@@ -811,26 +907,31 @@ public class PrenotazioniService {
     }
 
     /**
-     * Verifica la disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  della sala per la prenotazione richiesta, escludendo l'evento in modifica.
+     * Verifica la disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  della sala
+     * per la prenotazione richiesta, escludendo l'evento in modifica.
      */
     private void verificaDisponibilita(PrenotazioneRequestDTO request, String eventIdDaEscludere, Jwt jwt) {
         verificaDisponibilita(request, eventIdDaEscludere, null, jwt);
     }
 
     /**
-     * Verifica che nessuna delle occorrenze generate dalla richiesta si sovrapponga a eventi esistenti nella sala.
-     * Esclude dal confronto l'identificativo dell'evento singolo o del master della serie in corso di modifica.
+     * Verifica che nessuna delle occorrenze generate dalla richiesta si sovrapponga
+     * a eventi esistenti nella sala.
+     * Esclude dal confronto l'identificativo dell'evento singolo o del master della
+     * serie in corso di modifica.
      */
-    private void verificaDisponibilita(PrenotazioneRequestDTO request, String eventIdDaEscludere, String seriesMasterIdDaEscludere, Jwt jwt) {
+    private void verificaDisponibilita(PrenotazioneRequestDTO request, String eventIdDaEscludere,
+            String seriesMasterIdDaEscludere, Jwt jwt) {
         String salaEmail = request.getSalaEmail();
-        
+
         List<LocalDateTime[]> occorrenze = generaOccorrenze(request);
-        if (occorrenze.isEmpty()) return;
+        if (occorrenze.isEmpty())
+            return;
 
         LocalDateTime startReq = LocalDateTime.parse(request.getStart().substring(0, 19));
         LocalDateTime endReq = LocalDateTime.parse(request.getEnd().substring(0, 19));
-        LocalDateTime primoInizio = occorrenze.stream().map(o -> o[0]).min(LocalDateTime::compareTo).orElse(startReq);
-        LocalDateTime ultimaFine = occorrenze.stream().map(o -> o[1]).max(LocalDateTime::compareTo).orElse(endReq);
+        LocalDateTime primoInizio = occorrenze.stream().map(o -> o[0]).min(Comparator.naturalOrder()).orElse(startReq);
+        LocalDateTime ultimaFine = occorrenze.stream().map(o -> o[1]).max(Comparator.naturalOrder()).orElse(endReq);
 
         DateTimeFormatter formatoFiltro = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
         String filtroInizio = primoInizio.toLocalDate().atStartOfDay().format(formatoFiltro);
@@ -848,32 +949,39 @@ public class PrenotazioniService {
                             return false;
                         }
                         if (seriesMasterIdDaEscludere != null) {
-                            if (seriesMasterIdDaEscludere.equals(e.getId())) return false;
-                            if (seriesMasterIdDaEscludere.equals(e.getSeriesMasterId())) return false;
+                            if (seriesMasterIdDaEscludere.equals(e.getId()))
+                                return false;
+                            if (seriesMasterIdDaEscludere.equals(e.getSeriesMasterId()))
+                                return false;
                         }
                         return true;
                     })
                     .anyMatch(e -> {
-                        if (e.getStart() == null || e.getEnd() == null) return false;
-                        
+                        if (e.getStart() == null || e.getEnd() == null)
+                            return false;
+
                         String startPulito = e.getStart().length() > 19 ? e.getStart().substring(0, 19) : e.getStart();
                         String endPulito = e.getEnd().length() > 19 ? e.getEnd().substring(0, 19) : e.getEnd();
-                        
+
                         LocalDateTime esistenteStart = LocalDateTime.parse(startPulito);
                         LocalDateTime esistenteEnd = LocalDateTime.parse(endPulito);
-                        
+
                         return esistenteStart.isBefore(nuovoEnd) && esistenteEnd.isAfter(nuovoStart);
                     });
 
             if (conflitto) {
                 log.warn("Conflitto rilevato: sala {} gia occupata in data {}", salaEmail, nuovoStart.toLocalDate());
-                throw new IllegalArgumentException(String.format("Errore: la sala risulta gia occupata il %s nella fascia oraria richiesta.", nuovoStart.toLocalDate().toString()));
+                throw new IllegalArgumentException(
+                        String.format("Errore: la sala risulta gia occupata il %s nella fascia oraria richiesta.",
+                                nuovoStart.toLocalDate().toString()));
             }
         }
     }
 
     /**
-     * Controlla i privilegi dell'utente richiedente, sollevando AccessDeniedException se non ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ un amministratore.
+     * Controlla i privilegi dell'utente richiedente, sollevando
+     * AccessDeniedException se non ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ un
+     * amministratore.
      */
     private void verificaAdmin(Jwt jwt) {
         if (!isAdmin(jwt)) {
@@ -883,7 +991,8 @@ public class PrenotazioniService {
     }
 
     /**
-     * Verifica la presenza del ruolo di amministratore all'interno dei claims del token JWT,
+     * Verifica la presenza del ruolo di amministratore all'interno dei claims del
+     * token JWT,
      * leggendo il ruolo configurato nell'ambiente (app.admin-role).
      */
     private boolean isAdmin(Jwt jwt) {
@@ -891,14 +1000,16 @@ public class PrenotazioniService {
             return false;
         }
         List<String> ruoli = jwt.getClaimAsStringList("roles");
-        String expectedRole = (appConfig != null && appConfig.getAdminRole() != null && !appConfig.getAdminRole().isBlank())
-                ? appConfig.getAdminRole()
-                : "RoomBooking.Admin";
+        String expectedRole = (appConfig != null && appConfig.getAdminRole() != null
+                && !appConfig.getAdminRole().isBlank())
+                        ? appConfig.getAdminRole()
+                        : "RoomBooking.Admin";
         return ruoli != null && ruoli.contains(expectedRole);
     }
 
     /**
-     * Recupera o inizializza il ReentrantLock associato a una sala, verificando preventivamente
+     * Recupera o inizializza il ReentrantLock associato a una sala, verificando
+     * preventivamente
      * che la sala esista e appartenga all'elenco delle sale gestite da Exchange.
      */
     private ReentrantLock getLockPerSala(String salaEmail) {
@@ -919,16 +1030,18 @@ public class PrenotazioniService {
     }
 
     /**
-     * Rimuove i tag HTML dal corpo dell'evento Microsoft Graph convertendo i ritorni a capo in newline,
-     * senza ricreare caratteri che potrebbero essere interpretati come codice eseguibile.
+     * Rimuove i tag HTML dal corpo dell'evento Microsoft Graph convertendo i
+     * ritorni a capo in newline,
+     * senza ricreare caratteri che potrebbero essere interpretati come codice
+     * eseguibile.
      */
     private String stripHtml(String html) {
         if (html == null || html.isEmpty()) {
             return html;
         }
         String testo = html.replaceAll("(?i)<br\\s*/?>", "\n")
-                           .replaceAll("(?i)</p>", "\n")
-                           .replaceAll("(?i)</div>", "\n");
+                .replaceAll("(?i)</p>", "\n")
+                .replaceAll("(?i)</div>", "\n");
         while (testo.matches("(?s).*<[^>]*>.*")) {
             testo = testo.replaceAll("<[^>]*>", "");
         }
@@ -942,21 +1055,24 @@ public class PrenotazioniService {
     }
 
     /**
-     * Calcola la lista puntuale di tutte le occorrenze [data/ora inizio, data/ora fine]
-     * previste da una richiesta (evento singolo o espansione della ricorrenza daily/weekly/monthly).
+     * Calcola la lista puntuale di tutte le occorrenze [data/ora inizio, data/ora
+     * fine]
+     * previste da una richiesta (evento singolo o espansione della ricorrenza
+     * daily/weekly/monthly).
      */
     private List<LocalDateTime[]> generaOccorrenze(PrenotazioneRequestDTO request) {
         List<LocalDateTime[]> occorrenze = new ArrayList<>();
         LocalDateTime start = LocalDateTime.parse(request.getStart());
         LocalDateTime end = LocalDateTime.parse(request.getEnd());
 
-        // Evento singolo o aggiornamento su singola occorrenza: restituisce unicamente la data dell'evento
+        // Evento singolo o aggiornamento su singola occorrenza: restituisce unicamente
+        // la data dell'evento
         if ("SINGOLA".equalsIgnoreCase(request.getTipoModifica())
-                || request.getPattern() == null 
+                || request.getPattern() == null
                 || request.getPattern().isBlank()
-                || request.getDataFine() == null 
+                || request.getDataFine() == null
                 || request.getDataFine().isBlank()) {
-            occorrenze.add(new LocalDateTime[]{start, end});
+            occorrenze.add(new LocalDateTime[] { start, end });
             return occorrenze;
         }
 
@@ -967,7 +1083,8 @@ public class PrenotazioniService {
         switch (request.getPattern().toLowerCase()) {
             case "daily":
                 for (LocalDate d = start.toLocalDate(); !d.isAfter(dataFine); d = d.plusDays(interval)) {
-                    occorrenze.add(new LocalDateTime[]{d.atTime(start.toLocalTime()), d.atTime(start.toLocalTime()).plusMinutes(durationMinutes)});
+                    occorrenze.add(new LocalDateTime[] { d.atTime(start.toLocalTime()),
+                            d.atTime(start.toLocalTime()).plusMinutes(durationMinutes) });
                 }
                 break;
             case "weekly":
@@ -977,7 +1094,8 @@ public class PrenotazioniService {
                         java.time.DayOfWeek dow = java.time.DayOfWeek.valueOf(giorno.toUpperCase());
                         LocalDate d = ws.with(dow);
                         if (!d.isBefore(start.toLocalDate()) && !d.isAfter(dataFine)) {
-                            occorrenze.add(new LocalDateTime[]{d.atTime(start.toLocalTime()), d.atTime(start.toLocalTime()).plusMinutes(durationMinutes)});
+                            occorrenze.add(new LocalDateTime[] { d.atTime(start.toLocalTime()),
+                                    d.atTime(start.toLocalTime()).plusMinutes(durationMinutes) });
                         }
                     }
                 }
@@ -987,8 +1105,10 @@ public class PrenotazioniService {
                 int monthStep = 0;
                 while (true) {
                     LocalDate d = baseDate.plusMonths((long) monthStep * interval);
-                    if (d.isAfter(dataFine)) break;
-                    occorrenze.add(new LocalDateTime[]{d.atTime(start.toLocalTime()), d.atTime(start.toLocalTime()).plusMinutes(durationMinutes)});
+                    if (d.isAfter(dataFine))
+                        break;
+                    occorrenze.add(new LocalDateTime[] { d.atTime(start.toLocalTime()),
+                            d.atTime(start.toLocalTime()).plusMinutes(durationMinutes) });
                     monthStep++;
                 }
                 break;

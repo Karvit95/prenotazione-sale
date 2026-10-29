@@ -28,7 +28,7 @@ public class AsyncConfig {
      * - Graceful shutdown: attende fino a 30 secondi il completamento dei task in corso prima della chiusura.
      */
     @Bean(name = "graphQueryExecutor")
-    public ThreadPoolTaskExecutor graphQueryExecutor() {
+    ThreadPoolTaskExecutor graphQueryExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(10);
         executor.setMaxPoolSize(20);

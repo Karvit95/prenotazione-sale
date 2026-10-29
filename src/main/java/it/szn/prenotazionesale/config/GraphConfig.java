@@ -28,7 +28,7 @@ public class GraphConfig {
      * a tempo indefinito in caso di latenza di rete o interruzioni TCP verso Microsoft 365.
      */
     @Bean
-    public OkHttpClient graphOkHttpClient() {
+    OkHttpClient graphOkHttpClient() {
         return GraphClientFactory.create()
                 .connectTimeout(Duration.ofSeconds(10))
                 .readTimeout(Duration.ofSeconds(15))
@@ -41,7 +41,7 @@ public class GraphConfig {
      * Istanza del GraphServiceClient che utilizza l'adapter OkHttp dotato di timeout configurati.
      */
     @Bean
-    public GraphServiceClient graphServiceClient(OkHttpClient graphOkHttpClient) {
+    GraphServiceClient graphServiceClient(OkHttpClient graphOkHttpClient) {
         var credential = new ClientSecretCredentialBuilder()
                 .tenantId(appConfig.getAzure().getTenantId())
                 .clientId(appConfig.getAzure().getClientId())
