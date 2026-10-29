@@ -29,6 +29,16 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+/**
+ * Servizio per la gestione operativa delle prenotazioni delle sale riunioni.
+ * Interagisce con Microsoft 365 Exchange Online tramite le API Microsoft Graph.
+ *
+ * ResponsabilitÃ  principali:
+ * - Consultazione degli eventi e delle disponibilitÃ  (tramite calendarView per espansione ricorrenze).
+ * - Creazione, aggiornamento e cancellazione di prenotazioni singole e serie ricorrenti.
+ * - Migrazione atomica di eventi tra sale diverse (cambio sala) con logica di rollback compensativo.
+ * - Sincronizzazione thread-safe per singola sala tramite lock rientranti con timeout.
+ */
 @Slf4j
 @AllArgsConstructor
 @Service
@@ -38,42 +48,41 @@ public class PrenotazioniService {
     private final SaleService saleService;
     private final AppConfig appConfig;
 
-    // Un lock per sala: serializza il blocco "verifica disponibilit\u00e0 + scrittura
-    // evento"
-    // cos\u00ec due richieste concorrenti sulla stessa sala non possono superare
-    // entrambe il
-    // controllo di disponibilit\u00e0 e creare eventi sovrapposti (TOCTOU / race
-    // condition).
-    //
-    // NB: funziona solo con una singola istanza dell'applicazione in esecuzione (il
-    // lock
-    // vive in memoria, non \u00e8 condiviso tra pi\u00f9 repliche). Va bene per il deployment
-    // attuale
-    // a singola istanza; se in futuro si passa a pi\u00f9 repliche, questo lock non
-    // basta pi\u00f9
-    // e serve un lock distribuito (es. su un DB condiviso).
+    /**
+     * Mappa dei lock rientranti per singola sala.
+     * Serializza le operazioni di verifica disponibilitÃ  e successiva scrittura su Microsoft Graph
+     * per la medesima sala, prevenendo race condition da prenotazioni simultanee sovrapposte (TOCTOU).
+     * Ogni lock opera in memoria locale con timeout per prevenire blocchi indefiniti dei thread.
+     */
     private final ConcurrentHashMap<String, ReentrantLock> lockPerSala = new ConcurrentHashMap<>();
 
-    // Executor dedicato per le chiamate Graph fatte in parallelo su pi\u00f9 sale
-    // (usato da getPrenotazioniTutteSale). Dimensionato per lavoro I/O-bound
-    // (thread bloccati in attesa di rete verso Graph), non CPU-bound: a differenza
-    // del ForkJoinPool.commonPool() usato di default da parallelStream(), questo
-    // pool non \u00e8 condiviso col resto della JVM e la sua dimensione riflette il
-    // numero di sale gestite, non il numero di core della macchina.
+    /**
+     * Thread pool dedicato alle interrogazioni parallele verso Microsoft Graph per il recupero
+     * simultaneo degli eventi di tutte le sale (getPrenotazioniTutteSale).
+     * Trattandosi di operazioni I/O-bound (chiamate HTTP remote), utilizza un pool dimensionato
+     * per evitare colli di bottiglia o saturazione del pool principale dell'applicazione.
+     */
     private final ExecutorService executorGraphParallelo = Executors.newFixedThreadPool(20);
 
+    /**
+     * Rilascia le risorse dell'executor dedicato in fase di arresto del contesto applicativo.
+     */
     @PreDestroy
     public void shutdown() {
         executorGraphParallelo.shutdown();
     }
 
-    // Whitelist rigorosa per parametri usati in un filtro OData: solo cifre, T, :, ., -, +, Z.
-    // Copre sia il formato ISO UTC con 'Z' inviato dal frontend (2026-07-10T08:00:00.000Z)
-    // sia il formato "naive" locale usato dalle chiamate interne (2026-07-10T08:00:00).
-    // Qualsiasi altro carattere (apici, spazi, parole chiave OData come "or"/"eq") viene rifiutato.
+    /**
+     * Pattern per la validazione delle stringhe di data/ora impiegate nei filtri OData di Microsoft Graph.
+     * Ammette sia il formato ISO-8601 UTC (con 'Z' o offset) che il formato ISO locale senza offset,
+     * bloccando caratteri non consentiti per prevenire injection di sintassi OData non controllata.
+     */
     private static final Pattern PATTERN_DATA_FILTRO = Pattern.compile(
             "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?(Z|[+-]\\d{2}:\\d{2})?$");
 
+    /**
+     * Verifica che una stringa temporale rispetti il formato ISO-8601 consentito per i filtri Graph.
+     */
     private void validaParametroFiltroData(String valore, String nomeParametro) {
         if (valore == null || !PATTERN_DATA_FILTRO.matcher(valore).matches()) {
             log.warn("Parametro '{}' rifiutato per il filtro prenotazioni: valore non conforme al formato atteso", nomeParametro);
@@ -82,16 +91,23 @@ public class PrenotazioniService {
         }
     }
 
+    /**
+     * Recupera le prenotazioni confermate per una specifica sala nell'intervallo temporale richiesto.
+     * Utilizza l'endpoint calendarView di Microsoft Graph per espandere automaticamente tutte
+     * le occorrenze delle serie ricorrenti nel periodo indicato, convertite nel fuso Europe/Rome.
+     *
+     * @param salaEmail indirizzo email della casella di sala Exchange
+     * @param dataInizio estremo inferiore dell'intervallo temporale (formato ISO-8601)
+     * @param dataFine estremo superiore dell'intervallo temporale (formato ISO-8601)
+     * @param jwt token JWT del chiamante per la verifica dei privilegi di modifica
+     * @return lista delle prenotazioni presenti nel periodo
+     */
     public List<PrenotazioneDTO> getPrenotazioni(String salaEmail, String dataInizio, String dataFine, Jwt jwt) {
         log.info("Richiesta prenotazioni per sala {} dal {} al {}", salaEmail, dataInizio, dataFine);
 
         validaParametroFiltroData(dataInizio, "dataInizio");
         validaParametroFiltroData(dataFine, "dataFine");
 
-        // Usiamo calendarView invece di calendar/events perch\u00e9 calendarView
-        // espande automaticamente le occorrenze degli eventi ricorrenti nel
-        // periodo richiesto. Con calendar/events riceviamo solo l'evento master
-        // (la prima occorrenza), non tutte le istanze della serie.
         var events = graphClient.users().byUserId(salaEmail).calendarView().get(req -> {
             req.queryParameters.startDateTime = dataInizio;
             req.queryParameters.endDateTime = dataFine;
@@ -103,6 +119,16 @@ public class PrenotazioniService {
         return events.stream().map(event -> mapToDTO(event, salaEmail, jwt)).collect(Collectors.toList());
     }
 
+    /**
+     * Recupera in parallelo le prenotazioni di tutte le sale gestite nell'intervallo specificato.
+     * Esegue chiamate asincrone concorrenti su pool dedicato per ottimizzare i tempi di risposta,
+     * aggregando infine tutti gli eventi in una singola lista unificata.
+     *
+     * @param dataInizio estremo inferiore dell'intervallo temporale
+     * @param dataFine estremo superiore dell'intervallo temporale
+     * @param jwt token JWT del chiamante
+     * @return lista complessiva delle prenotazioni di tutte le sale
+     */
     public List<PrenotazioneDTO> getPrenotazioniTutteSale(String dataInizio, String dataFine, Jwt jwt) {
         log.info("Richiesta prenotazioni per tutte le sale dal {} al {}", dataInizio, dataFine);
         List<SalaDTO> tutteLeSale = saleService.getSale();
@@ -125,12 +151,20 @@ public class PrenotazioniService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Crea una nuova prenotazione (singola o serie ricorrente) per una sala.
+     * L'operazione acquisisce il lock esclusivo sulla sala target con timeout di 10 secondi,
+     * verifica l'assenza di sovrapposizioni orarie e registra l'evento su Microsoft Graph.
+     *
+     * @param request dati della prenotazione da creare
+     * @param jwt token JWT autenticato per il controllo di autorizzazione admin
+     * @return DTO dell'evento creato
+     */
     public PrenotazioneDTO creaPrenotazione(PrenotazioneRequestDTO request, Jwt jwt) {
         log.info("Creazione prenotazione per sala {} - titolo: {}", request.getSalaEmail(), request.getTitolo());
         verificaAdmin(jwt);
         validaOrariPrenotazione(request.getStart(), request.getEnd());
 
-        // Se ricorrente, valida anche i campi specifici
         if (request.getPattern() != null) {
             validaRicorrenza(request);
         }
@@ -158,6 +192,26 @@ public class PrenotazioniService {
         }
     }
 
+    /**
+     * Modifica una prenotazione esistente, gestendo sia l'aggiornamento all'interno della stessa sala
+     * sia la migrazione su una sala differente (cambio sala).
+     *
+     * In caso di Cambio Sala:
+     * - Acquisisce i lock di entrambe le sale in ordine lessicografico per evitare deadlock.
+     * - Crea il nuovo evento nella sala di destinazione (duplicando la serie dal master per gli eventi ricorrenti).
+     * - Cancella il vecchio evento dalla sala di origine.
+     * - Se la cancellazione fallisce, esegue un rollback compensativo rimuovendo il nuovo evento creato.
+     *
+     * In caso di Modifica sulla Stessa Sala:
+     * - Per le serie ricorrenti, aggiorna il Series Master preservando start ed end se l'orario non Ã¨ variato,
+     *   cosÃ¬ da mantenere intatte le singole eccezioni giÃ  configurate nella serie.
+     * - Per le singole occorrenze, aggiorna i dati specifici della data selezionata.
+     *
+     * @param eventId identificativo univoco dell'evento o occorrenza su Graph
+     * @param request payload con i dettagli aggiornati della prenotazione
+     * @param jwt token JWT autenticato per il controllo privilegi
+     * @return DTO dell'evento aggiornato
+     */
     public PrenotazioneDTO modificaPrenotazione(String eventId, PrenotazioneRequestDTO request, Jwt jwt) {
         log.info("Modifica prenotazione ID {} per sala {}", eventId, request.getSalaEmail());
         verificaAdmin(jwt);
@@ -165,10 +219,9 @@ public class PrenotazioniService {
 
         String salaOriginale = request.getSalaEmailOriginale();
 
-
-        // Se la sala è cambiata, cancella dalla vecchia e crea sulla nuova
+        // Ramo 1: Cambio sala (migrazione tra due caselle Exchange distinte)
         if (salaOriginale != null && !salaOriginale.equals(request.getSalaEmail())) {
-            // Prevenzione Deadlock tramite Canonical Lock Ordering (ordinamento alfabetico)
+            // Ordinamento lessicografico dei lock delle due sale per scongiurare deadlock tra richieste concorrenti
             String primaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? salaOriginale : request.getSalaEmail();
             String secondaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? request.getSalaEmail() : salaOriginale;
 
@@ -186,129 +239,114 @@ public class PrenotazioniService {
                 if (!lock2Acquired) {
                     throw new IllegalStateException("Timeout nell'acquisizione del lock per la sala: " + secondaSala);
                 }
-            log.info("Sala cambiata da {} a {}: creo il nuovo evento prima di cancellare il vecchio", salaOriginale,
-                    request.getSalaEmail());
+                log.info("Sala cambiata da {} a {}: creo il nuovo evento prima di cancellare il vecchio", salaOriginale,
+                        request.getSalaEmail());
 
-            boolean modificaSerie = "SERIE".equals(request.getTipoModifica());
-            boolean haSeriesMaster = request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank();
+                boolean modificaSerie = "SERIE".equals(request.getTipoModifica());
+                boolean haSeriesMaster = request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank();
 
-            PrenotazioneDTO nuovaPrenotazione;
+                PrenotazioneDTO nuovaPrenotazione;
 
-            if (modificaSerie && haSeriesMaster) {
-                // Cambio sala su TUTTA LA SERIE:
-                // Recupera il series master originale dalla vecchia sala per copiare
-                // i dati corretti (data di inizio originale della serie, recurrence pattern,
-                // range, etc.) \u2014 altrimenti verrebbe usata la data dell'occorrenza cliccata
-                // nella nuova serie, causando dati errati.
-                log.info("Modifica serie su cambio sala: recupero master originale ID {} dalla sala {}",
-                        request.getSeriesMasterId(), salaOriginale);
+                if (modificaSerie && haSeriesMaster) {
+                    // Cambio sala su intera serie: recupera il master originale per clonarne orari, pattern e range
+                    log.info("Modifica serie su cambio sala: recupero master originale ID {} dalla sala {}",
+                            request.getSeriesMasterId(), salaOriginale);
 
-                var masterOriginale = graphClient.users().byUserId(salaOriginale).events()
-                        .byEventId(request.getSeriesMasterId()).get(req -> {
-                            req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
-                        });
+                    var masterOriginale = graphClient.users().byUserId(salaOriginale).events()
+                            .byEventId(request.getSeriesMasterId()).get(req -> {
+                                req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
+                            });
 
-                // Verifica disponibilità sulla sala di destinazione per tutta la serie prima di creare
-                PrenotazioneRequestDTO checkRequest = new PrenotazioneRequestDTO();
-                checkRequest.setSalaEmail(request.getSalaEmail());
-                checkRequest.setStart(masterOriginale.getStart().getDateTime());
-                checkRequest.setEnd(masterOriginale.getEnd().getDateTime());
-                if (masterOriginale.getRecurrence() != null && masterOriginale.getRecurrence().getPattern() != null) {
-                    var p = masterOriginale.getRecurrence().getPattern();
-                    checkRequest.setPattern(p.getType() != null ? p.getType().name().toLowerCase() : null);
-                    checkRequest.setIntervallo(p.getInterval());
-                    if (p.getDaysOfWeek() != null) {
-                        checkRequest.setGiorniSettimana(p.getDaysOfWeek().stream().map(Enum::name).collect(Collectors.toList()));
+                    // Verifica preliminare di disponibilitÃ  della sala di destinazione per l'intera durata della serie
+                    PrenotazioneRequestDTO checkRequest = new PrenotazioneRequestDTO();
+                    checkRequest.setSalaEmail(request.getSalaEmail());
+                    checkRequest.setStart(masterOriginale.getStart().getDateTime());
+                    checkRequest.setEnd(masterOriginale.getEnd().getDateTime());
+                    if (masterOriginale.getRecurrence() != null && masterOriginale.getRecurrence().getPattern() != null) {
+                        var p = masterOriginale.getRecurrence().getPattern();
+                        checkRequest.setPattern(p.getType() != null ? p.getType().name().toLowerCase() : null);
+                        checkRequest.setIntervallo(p.getInterval());
+                        if (p.getDaysOfWeek() != null) {
+                            checkRequest.setGiorniSettimana(p.getDaysOfWeek().stream().map(Enum::name).collect(Collectors.toList()));
+                        }
                     }
-                }
-                if (masterOriginale.getRecurrence() != null && masterOriginale.getRecurrence().getRange() != null) {
-                    checkRequest.setDataFine(masterOriginale.getRecurrence().getRange().getEndDate() != null 
-                            ? masterOriginale.getRecurrence().getRange().getEndDate().toString() : null);
-                }
-                verificaDisponibilita(checkRequest, null, jwt);
-
-                // Costruisci il nuovo evento copiando i dati del master originale
-                var nuovoEvento = new Event();
-                nuovoEvento.setSubject(request.getTitolo());
-
-                if (request.getDescrizione() != null) {
-                    var body = new ItemBody();
-                    body.setContent(request.getDescrizione());
-                    body.setContentType(BodyType.Text);
-                    nuovoEvento.setBody(body);
-                }
-
-                // Usa la data/ora del master originale (non dell'occorrenza cliccata)
-                var start = new DateTimeTimeZone();
-                start.setDateTime(masterOriginale.getStart().getDateTime());
-                start.setTimeZone("Europe/Rome");
-                nuovoEvento.setStart(start);
-
-                var end = new DateTimeTimeZone();
-                end.setDateTime(masterOriginale.getEnd().getDateTime());
-                end.setTimeZone("Europe/Rome");
-                nuovoEvento.setEnd(end);
-
-                // Copia la recurrence dal master originale (pattern + range)
-                // IMPORTANTE: non possiamo usare masterOriginale.getRecurrence() direttamente
-                // perch\u00e9 Graph API richiede oggetti costruiti esplicitamente per la creazione
-                // di nuovi eventi (setRecurrence da un oggetto esistente causa errore
-                // "Missing parameters: Pattern").
-                var recurrenceOriginale = masterOriginale.getRecurrence();
-                if (recurrenceOriginale != null && recurrenceOriginale.getPattern() != null) {
-                    var nuovaRecurrence = new PatternedRecurrence();
-
-                    // Copia il pattern
-                    var nuovoPattern = new RecurrencePattern();
-                    nuovoPattern.setType(recurrenceOriginale.getPattern().getType());
-                    nuovoPattern.setInterval(recurrenceOriginale.getPattern().getInterval());
-                    if (recurrenceOriginale.getPattern().getDaysOfWeek() != null) {
-                        nuovoPattern.setDaysOfWeek(recurrenceOriginale.getPattern().getDaysOfWeek());
+                    if (masterOriginale.getRecurrence() != null && masterOriginale.getRecurrence().getRange() != null) {
+                        checkRequest.setDataFine(masterOriginale.getRecurrence().getRange().getEndDate() != null 
+                                ? masterOriginale.getRecurrence().getRange().getEndDate().toString() : null);
                     }
-                    if (recurrenceOriginale.getPattern().getDayOfMonth() != null) {
-                        nuovoPattern.setDayOfMonth(recurrenceOriginale.getPattern().getDayOfMonth());
-                    }
-                    nuovaRecurrence.setPattern(nuovoPattern);
+                    verificaDisponibilita(checkRequest, null, jwt);
 
-                    // Copia il range
-                    if (recurrenceOriginale.getRange() != null) {
-                        var nuovoRange = new RecurrenceRange();
-                        nuovoRange.setType(recurrenceOriginale.getRange().getType());
-                        nuovoRange.setStartDate(recurrenceOriginale.getRange().getStartDate());
-                        nuovoRange.setEndDate(recurrenceOriginale.getRange().getEndDate());
-                        nuovoRange.setNumberOfOccurrences(recurrenceOriginale.getRange().getNumberOfOccurrences());
-                        nuovaRecurrence.setRange(nuovoRange);
+                    // Ricostruzione esplicita della serie ricorrente nella sala di destinazione
+                    var nuovoEvento = new Event();
+                    nuovoEvento.setSubject(request.getTitolo());
+
+                    if (request.getDescrizione() != null) {
+                        var body = new ItemBody();
+                        body.setContent(request.getDescrizione());
+                        body.setContentType(BodyType.Text);
+                        nuovoEvento.setBody(body);
                     }
 
-                    nuovoEvento.setRecurrence(nuovaRecurrence);
+                    var start = new DateTimeTimeZone();
+                    start.setDateTime(masterOriginale.getStart().getDateTime());
+                    start.setTimeZone("Europe/Rome");
+                    nuovoEvento.setStart(start);
+
+                    var end = new DateTimeTimeZone();
+                    end.setDateTime(masterOriginale.getEnd().getDateTime());
+                    end.setTimeZone("Europe/Rome");
+                    nuovoEvento.setEnd(end);
+
+                    var recurrenceOriginale = masterOriginale.getRecurrence();
+                    if (recurrenceOriginale != null && recurrenceOriginale.getPattern() != null) {
+                        var nuovaRecurrence = new PatternedRecurrence();
+
+                        var nuovoPattern = new RecurrencePattern();
+                        nuovoPattern.setType(recurrenceOriginale.getPattern().getType());
+                        nuovoPattern.setInterval(recurrenceOriginale.getPattern().getInterval());
+                        if (recurrenceOriginale.getPattern().getDaysOfWeek() != null) {
+                            nuovoPattern.setDaysOfWeek(recurrenceOriginale.getPattern().getDaysOfWeek());
+                        }
+                        if (recurrenceOriginale.getPattern().getDayOfMonth() != null) {
+                            nuovoPattern.setDayOfMonth(recurrenceOriginale.getPattern().getDayOfMonth());
+                        }
+                        nuovaRecurrence.setPattern(nuovoPattern);
+
+                        if (recurrenceOriginale.getRange() != null) {
+                            var nuovoRange = new RecurrenceRange();
+                            nuovoRange.setType(recurrenceOriginale.getRange().getType());
+                            nuovoRange.setStartDate(recurrenceOriginale.getRange().getStartDate());
+                            nuovoRange.setEndDate(recurrenceOriginale.getRange().getEndDate());
+                            nuovoRange.setNumberOfOccurrences(recurrenceOriginale.getRange().getNumberOfOccurrences());
+                            nuovaRecurrence.setRange(nuovoRange);
+                        }
+
+                        nuovoEvento.setRecurrence(nuovaRecurrence);
+                    }
+
+                    var createdEvent = graphClient.users().byUserId(request.getSalaEmail()).calendar().events()
+                            .post(nuovoEvento);
+
+                    log.info("Nuova serie creata con ID {} nella sala {} (originata dal master {})",
+                            createdEvent.getId(), request.getSalaEmail(), request.getSeriesMasterId());
+
+                    nuovaPrenotazione = mapToDTO(createdEvent, request.getSalaEmail(), jwt);
+                } else if (!modificaSerie && haSeriesMaster) {
+                    // Cambio sala su singola occorrenza: genera un evento singolo non ricorrente nella nuova sala
+                    nuovaPrenotazione = creaPrenotazione(request, jwt);
+                } else {
+                    // Evento singolo standard: crea la prenotazione nella nuova sala
+                    nuovaPrenotazione = creaPrenotazione(request, jwt);
                 }
 
-                var createdEvent = graphClient.users().byUserId(request.getSalaEmail()).calendar().events()
-                        .post(nuovoEvento);
+                String idDaCancellare = (modificaSerie && haSeriesMaster)
+                                    ? request.getSeriesMasterId()
+                                    : eventId;
 
-                log.info("Nuova serie creata con ID {} nella sala {} (originata dal master {})",
-                        createdEvent.getId(), request.getSalaEmail(), request.getSeriesMasterId());
-
-                nuovaPrenotazione = mapToDTO(createdEvent, request.getSalaEmail(), jwt);
-            } else if (!modificaSerie && haSeriesMaster) {
-                // Cambio sala su SINGOLA OCCORRENZA:
-                // Crea un singolo evento (NO ricorrenza) nella nuova sala usando la data
-                // dell'occorrenza cliccata. Il frontend si \u00e8 gi\u00e0 assicurato di non inviare
-                // pattern in questo caso (isSingleOccurrenceWithRoomChange).
-                nuovaPrenotazione = creaPrenotazione(request, jwt);
-            } else {
-                // Evento singolo (non ricorrente): comportamento normale
-                nuovaPrenotazione = creaPrenotazione(request, jwt);
-            }
-
-            String idDaCancellare = (modificaSerie && haSeriesMaster)
-                                ? request.getSeriesMasterId()
-                                : eventId;
-
-            try {
-                graphClient.users().byUserId(salaOriginale).events().byEventId(idDaCancellare).delete();
+                try {
+                    graphClient.users().byUserId(salaOriginale).events().byEventId(idDaCancellare).delete();
                 } catch (Exception e) {
-                    // Rollback compensativo: elimina il nuovo evento creato per evitare duplicati orfani
+                    // Rollback compensativo: elimina l'evento appena creato per evitare la persistenza di duplicati
                     log.error("Cancellazione evento originale {} su sala {} fallita. Tento rollback dell'evento creato {} su sala {}",
                             idDaCancellare, salaOriginale, nuovaPrenotazione.getId(), request.getSalaEmail(), e);
                     try {
@@ -330,6 +368,7 @@ public class PrenotazioniService {
             }
         }
 
+        // Ramo 2: Modifica nella stessa sala
         ReentrantLock lock = getLockPerSala(request.getSalaEmail());
         boolean lockAcquired = false;
         try {
@@ -337,112 +376,90 @@ public class PrenotazioniService {
             if (!lockAcquired) {
                 throw new IllegalStateException("Timeout acquisizione lock per la sala: " + request.getSalaEmail());
             }
-            // Determina se modificare la singola occorrenza o l'intera serie
+
             String tipoModifica = request.getTipoModifica();
             boolean modificaSerie = "SERIE".equals(tipoModifica);
 
+            // Esclude dal controllo di disponibilitÃ  l'evento stesso o il master della serie in modifica
             String seriesMasterIdDaEscludere = modificaSerie 
                     ? ((request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank()) ? request.getSeriesMasterId() : eventId)
                     : null;
             verificaDisponibilita(request, eventId, seriesMasterIdDaEscludere, jwt);
 
-        if (modificaSerie) {
-            // PATCH sul series master: in Graph, l'effetto del PATCH dipende da QUALE ID
-            // usi, non da un flag. Se abbiamo l'ID del series master (evento ricorrente),
-            // dobbiamo usare quello \u2014 l'ID dell'occorrenza cliccata toccherebbe solo
-            // quella singola data, vanificando la scelta "modifica tutta la serie".
-            String idSuCuiOperare = (request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank())
-                    ? request.getSeriesMasterId()
-                    : eventId; // evento non ricorrente: eventId \u00e8 gi\u00e0 l'ID corretto
+            if (modificaSerie) {
+                // Aggiornamento Series Master su Microsoft Graph
+                String idSuCuiOperare = (request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank())
+                        ? request.getSeriesMasterId()
+                        : eventId;
 
-            // Non usiamo buildEvent() perch\u00e9 includerebbe il campo recurrence,
-            // che su Graph SOSTITUIREBBE (non unirebbe) la definizione della
-            // ricorrenza originale. Invece costruiamo un corpo che aggiorni solo
-            // i campi base (titolo, descrizione, start/end) SENZA il campo
-            // recurrence: in questo modo Graph preserva la ricorrenza originale
-            // dell'evento master.
-            var event = new Event();
-            event.setSubject(request.getTitolo());
+                var event = new Event();
+                event.setSubject(request.getTitolo());
 
-            if (request.getDescrizione() != null) {
-                var body = new ItemBody();
-                body.setContent(request.getDescrizione());
-                body.setContentType(BodyType.Text);
-                event.setBody(body);
-            }
-
-            // IMPORTANTE: quando si modifica l'INTERA SERIE, la request contiene la data
-            // dell'occorrenza su cui l'utente ha cliccato, NON la data originale del series
-            // master. Se usassimo request.getStart() cos\u00ec com'\u00e8, il PATCH cambierebbe anche
-            // la data di inizio del master, causando la re-evaluazione di tutte le eccezioni
-            // (occorrenze con data modificata individualmente) da parte di Graph API.
-            //
-            // Per evitare questo bug, recuperiamo l'evento master corrente e preserviamo
-            // la sua data originale (AAAA-MM-GG), applicando solo il nuovo orario richiesto.
-            String nuovoStartDateTime;
-            String nuovoEndDateTime;
-            boolean orarioModificato = true;
-
-            try {
-                // Recupera l'evento master per ottenere la data originale
-                var existingMaster = graphClient.users().byUserId(request.getSalaEmail()).events()
-                        .byEventId(idSuCuiOperare).get(req -> {
-                            req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
-                        });
-
-                String dataOriginaleMaster = existingMaster.getStart().getDateTime().substring(0, 10);
-
-                // Calcola la durata dalla request
-                LocalDateTime reqStart = LocalDateTime.parse(request.getStart().substring(0, 19));
-                LocalDateTime reqEnd = LocalDateTime.parse(request.getEnd().substring(0, 19));
-                long durataMinuti = java.time.Duration.between(reqStart, reqEnd).toMinutes();
-
-                // Nuovo start: data originale del master + orario dalla request
-                String nuovoOrario = request.getStart().substring(11, 19); // HH:mm:ss
-                nuovoStartDateTime = dataOriginaleMaster + "T" + nuovoOrario;
-
-                // Nuovo end: stessa data originale + (orario dalla request + durata)
-                LocalDateTime nuovoEndLDT = LocalDateTime.parse(dataOriginaleMaster + "T" + nuovoOrario)
-                        .plusMinutes(durataMinuti);
-                nuovoEndDateTime = nuovoEndLDT.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
-
-                // In Graph API, aggiornare start/end sul series master cancella tutte le eccezioni della serie.
-                // Aggiorniamo start/end solo se l'orario Ã¨ effettivamente cambiato rispetto al master esistente.
-                String masterStartOriginale = existingMaster.getStart() != null ? existingMaster.getStart().getDateTime() : "";
-                if (masterStartOriginale.length() >= 19 && masterStartOriginale.substring(11, 19).equals(nuovoOrario)) {
-                    orarioModificato = false;
+                if (request.getDescrizione() != null) {
+                    var body = new ItemBody();
+                    body.setContent(request.getDescrizione());
+                    body.setContentType(BodyType.Text);
+                    event.setBody(body);
                 }
 
-                log.debug("Modifica SERIE: preservata data originale master {} con nuovo orario {} -> start={}, end={}, orarioModificato={}",
-                        dataOriginaleMaster, nuovoOrario, nuovoStartDateTime, nuovoEndDateTime, orarioModificato);
-            } catch (Exception e) {
-                // Fallback: se non riusciamo a leggere il master, usiamo i valori originali
-                // (comportamento pre-bugfix, potrebbe comunque causare il bug ma non blocca l'operazione)
-                log.warn("Impossibile recuperare il master per preservare la data originale, uso i valori della request: {}",
-                        e.getMessage());
-                nuovoStartDateTime = request.getStart();
-                nuovoEndDateTime = request.getEnd();
-            }
+                String nuovoStartDateTime;
+                String nuovoEndDateTime;
+                boolean orarioModificato = true;
 
-            if (orarioModificato) {
-                var start = new DateTimeTimeZone();
-                start.setDateTime(nuovoStartDateTime);
-                start.setTimeZone("Europe/Rome");
-                event.setStart(start);
+                try {
+                    // Recupera il master per preservarne la data d'inizio originale calcolando il nuovo orario giornaliero
+                    var existingMaster = graphClient.users().byUserId(request.getSalaEmail()).events()
+                            .byEventId(idSuCuiOperare).get(req -> {
+                                req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
+                            });
 
-                var end = new DateTimeTimeZone();
-                end.setDateTime(nuovoEndDateTime);
-                end.setTimeZone("Europe/Rome");
-                event.setEnd(end);
-            }
+                    String dataOriginaleMaster = existingMaster.getStart().getDateTime().substring(0, 10);
 
-            var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events()
-                    .byEventId(idSuCuiOperare).patch(event);
-            log.info("Prenotazione (serie, ID {}) modificata con successo", idSuCuiOperare);
-            return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
+                    LocalDateTime reqStart = LocalDateTime.parse(request.getStart().substring(0, 19));
+                    LocalDateTime reqEnd = LocalDateTime.parse(request.getEnd().substring(0, 19));
+                    long durataMinuti = java.time.Duration.between(reqStart, reqEnd).toMinutes();
+
+                    String nuovoOrario = request.getStart().substring(11, 19);
+                    nuovoStartDateTime = dataOriginaleMaster + "T" + nuovoOrario;
+
+                    LocalDateTime nuovoEndLDT = LocalDateTime.parse(dataOriginaleMaster + "T" + nuovoOrario)
+                            .plusMinutes(durataMinuti);
+                    nuovoEndDateTime = nuovoEndLDT.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
+
+                    // Se l'orario Ã¨ invariato (solo titolo o descrizione modificati), non invia start/end
+                    // nel PATCH per preservare eventuali eccezioni di date giÃ  modificate nella serie
+                    String masterStartOriginale = existingMaster.getStart() != null ? existingMaster.getStart().getDateTime() : "";
+                    if (masterStartOriginale.length() >= 19 && masterStartOriginale.substring(11, 19).equals(nuovoOrario)) {
+                        orarioModificato = false;
+                    }
+
+                    log.debug("Modifica SERIE: data master {} con orario {} -> start={}, end={}, orarioModificato={}",
+                            dataOriginaleMaster, nuovoOrario, nuovoStartDateTime, nuovoEndDateTime, orarioModificato);
+                } catch (Exception e) {
+                    log.warn("Impossibile recuperare il master per preservare la data originale, uso i valori della request: {}",
+                            e.getMessage());
+                    nuovoStartDateTime = request.getStart();
+                    nuovoEndDateTime = request.getEnd();
+                }
+
+                if (orarioModificato) {
+                    var start = new DateTimeTimeZone();
+                    start.setDateTime(nuovoStartDateTime);
+                    start.setTimeZone("Europe/Rome");
+                    event.setStart(start);
+
+                    var end = new DateTimeTimeZone();
+                    end.setDateTime(nuovoEndDateTime);
+                    end.setTimeZone("Europe/Rome");
+                    event.setEnd(end);
+                }
+
+                var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events()
+                        .byEventId(idSuCuiOperare).patch(event);
+                log.info("Prenotazione (serie, ID {}) modificata con successo", idSuCuiOperare);
+                return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
             } else {
-                // PATCH sulla singola occorrenza: costruiamo un corpo che aggiorni solo
-                // i campi base (start/end/titolo/descrizione) SENZA la ricorrenza
+                // Aggiornamento della singola occorrenza: aggiorna solo i dettagli di questa specifica istanza
                 var event = new Event();
                 event.setSubject(request.getTitolo());
 
@@ -479,10 +496,25 @@ public class PrenotazioniService {
         }
     }
 
+    /**
+     * Cancella una prenotazione o una serie ricorrente.
+     * Overload di comoditÃ  per default tipo 'SERIE'.
+     */
     public void cancellaPrenotazione(String eventId, String salaEmail, Jwt jwt) {
         cancellaPrenotazione(eventId, salaEmail, "SERIE", null, jwt);
     }
 
+    /**
+     * Cancella una prenotazione o una serie ricorrente dal calendario Exchange.
+     * Per una serie ricorrente completa, elimina il series master (rimuovendo l'intera pianificazione);
+     * per una singola occorrenza, elimina esclusivamente l'evento della data indicata.
+     *
+     * @param eventId identificativo dell'evento o dell'occorrenza
+     * @param salaEmail email della casella di sala
+     * @param tipoCancellazione "SERIE" o "SINGOLA"
+     * @param seriesMasterId identificativo del master della serie se disponibile
+     * @param jwt token JWT autenticato per il controllo privilegi
+     */
     public void cancellaPrenotazione(String eventId, String salaEmail, String tipoCancellazione, String seriesMasterId, Jwt jwt) {
         log.info("Cancellazione prenotazione ID {} per sala {} (tipo: {}, seriesMasterId: {})", eventId, salaEmail,
                 tipoCancellazione, seriesMasterId);
@@ -496,13 +528,9 @@ public class PrenotazioniService {
                 throw new IllegalStateException("Timeout acquisizione lock per la sala: " + salaEmail);
             }
 
-            // In Graph, cancellare un'occorrenza singola o l'intera serie usa la STESSA
-            // operazione (DELETE): cambia solo l'ID target. Passare l'ID del series master
-            // cancella tutta la serie; passare l'ID di un'occorrenza cancella solo quella data.
-            // Non serve (e non \u00e8 affidabile) un PATCH con isCancelled=true.
             String idSuCuiOperare = "SERIE".equals(tipoCancellazione) && seriesMasterId != null && !seriesMasterId.isBlank()
                     ? seriesMasterId
-                    : eventId; // occorrenza singola, oppure evento non ricorrente
+                    : eventId;
 
             graphClient.users().byUserId(salaEmail).events().byEventId(idSuCuiOperare).delete();
             log.info("Prenotazione {} cancellata dalla sala {} (tipo richiesto: {})", idSuCuiOperare, salaEmail,
@@ -518,8 +546,12 @@ public class PrenotazioniService {
         }
     }
 
-    // --- Metodi privati ---
+    // --- Metodi privati di supporto ---
 
+    /**
+     * Costruisce l'oggetto Event di Microsoft Graph popolando metadati, intervalli orari
+     * (con fuso orario fissato a Europe/Rome) ed eventuale regola di ricorrenza (Daily, Weekly, Monthly).
+     */
     private Event buildEvent(PrenotazioneRequestDTO request) {
         log.debug("Costruzione evento: titolo={}, start={}, end={}", request.getTitolo(), request.getStart(),
                 request.getEnd());
@@ -543,17 +575,14 @@ public class PrenotazioniService {
         end.setTimeZone("Europe/Rome");
         event.setEnd(end);
 
-        // Aggiungi ricorrenza se richiesta
         if (request.getPattern() != null && !request.getPattern().isEmpty()) {
             PatternedRecurrence recurrence = new PatternedRecurrence();
 
-            // Estrazione unica della data di inizio per evitare conflitti o duplicazioni di variabili
             String startDateStr = request.getStart().length() > 10
                     ? request.getStart().substring(0, 10)
                     : request.getStart();
             LocalDate dataInizio = LocalDate.parse(startDateStr);
 
-            // 1. Configurazione del Pattern
             RecurrencePattern pattern = new RecurrencePattern();
             pattern.setInterval(request.getIntervallo() != null ? request.getIntervallo() : 1);
 
@@ -565,18 +594,15 @@ public class PrenotazioniService {
                     pattern.setType(RecurrencePatternType.Weekly);
                     if (request.getGiorniSettimana() != null && !request.getGiorniSettimana().isEmpty()) {
                         pattern.setDaysOfWeek(request.getGiorniSettimana().stream()
-                                // La SDK Microsoft Graph richiede i giorni rigorosamente in minuscolo (es: "monday")
                                 .map(giorno -> DayOfWeek.forValue(giorno.toLowerCase()))
                                 .collect(Collectors.toList()));
                     } else {
-                        // Fallback di sicurezza: se la lista \u00e8 vuota usa il giorno della data di inizio
                         String dayName = dataInizio.getDayOfWeek().name().toLowerCase();
                         pattern.setDaysOfWeek(List.of(DayOfWeek.forValue(dayName)));
                     }
                     break;
                 case "monthly":
                     pattern.setType(RecurrencePatternType.AbsoluteMonthly);
-                    // OBBLIGATORIO per Microsoft Graph: fissa il giorno del mese (es. il 15 di ogni mese)
                     pattern.setDayOfMonth(dataInizio.getDayOfMonth());
                     break;
                 default:
@@ -585,7 +611,6 @@ public class PrenotazioniService {
 
             recurrence.setPattern(pattern);
 
-            // 2. Configurazione del Range
             RecurrenceRange range = new RecurrenceRange();
             range.setType(RecurrenceRangeType.EndDate);
 
@@ -595,14 +620,11 @@ public class PrenotazioniService {
                         : request.getDataFine();
                 range.setEndDate(LocalDate.parse(dataFineStr));
             } else {
-                // Fallback: fine dopo 365 giorni
                 range.setNumberOfOccurrences(365);
                 range.setType(RecurrenceRangeType.Numbered);
             }
 
-            // Riutilizzo pulito della variabile dataInizio estratta in precedenza
             range.setStartDate(dataInizio);
-
             recurrence.setRange(range);
 
             event.setRecurrence(recurrence);
@@ -613,10 +635,13 @@ public class PrenotazioniService {
         return event;
     }
 
+    /**
+     * Mappa un evento Microsoft Graph nel DTO applicativo per il frontend.
+     * Estrae identificativi di serie, ripulisce la descrizione da tag HTML e verifica i diritti di modifica.
+     */
     private PrenotazioneDTO mapToDTO(Event event, String salaEmail, Jwt jwt) {
         boolean isAdmin = isAdmin(jwt);
 
-        // Estrai informazioni ricorrenza
         String seriesMasterId = null;
         boolean ricorrente = false;
         String pattern = null;
@@ -625,7 +650,6 @@ public class PrenotazioniService {
             seriesMasterId = event.getSeriesMasterId();
             ricorrente = true;
         }
-        // L'evento master stesso ha un recurrence ma non seriesMasterId
         if (event.getRecurrence() != null && event.getRecurrence().getPattern() != null) {
             ricorrente = true;
             RecurrencePatternType patternType = event.getRecurrence().getPattern().getType();
@@ -634,14 +658,11 @@ public class PrenotazioniService {
                     case Daily: pattern = "daily"; break;
                     case Weekly: pattern = "weekly"; break;
                     case AbsoluteMonthly: pattern = "monthly"; break;
-                default: pattern = patternType.toString().toLowerCase();
+                    default: pattern = patternType.toString().toLowerCase();
                 }
             }
         }
 
-        // Microsoft Graph restituisce il corpo dell'evento in formato HTML
-        // Esempio: "<html><head>...<body>Testo</body></html>"
-        // Per visualizzarlo correttamente nel frontend (textarea), estraiamo solo il testo puro.
         String descrizionePulita = null;
         if (event.getBody() != null && event.getBody().getContent() != null) {
             descrizionePulita = stripHtml(event.getBody().getContent());
@@ -662,6 +683,9 @@ public class PrenotazioniService {
                 .build();
     }
 
+    /**
+     * Valida i vincoli di coerenza dei parametri di ricorrenza (tipo, data fine, intervallo, giorni selezionati).
+     */
     private void validaRicorrenza(PrenotazioneRequestDTO request) {
         String pattern = request.getPattern();
         if (pattern == null || pattern.isEmpty()) {
@@ -677,7 +701,6 @@ public class PrenotazioniService {
             throw new IllegalArgumentException("La data di fine ricorrenza e obbligatoria.");
         }
 
-        // La data di fine ricorrenza deve essere >= data di inizio
         try {
             LocalDate startDate = LocalDate.parse(request.getStart().substring(0, 10));
             LocalDate endDate = LocalDate.parse(request.getDataFine().substring(0, 10));
@@ -701,12 +724,14 @@ public class PrenotazioniService {
         }
     }
 
+    /**
+     * Valida che gli orari di inizio e fine rispettino il formato ISO-8601 e che l'inizio sia antecedente alla fine.
+     */
     private void validaOrariPrenotazione(String startStr, String endStr) {
         try {
             LocalDateTime start = LocalDateTime.parse(startStr);
             LocalDateTime end = LocalDateTime.parse(endStr);
 
-            // 1. La fine non puo essere prima (o uguale) all'inizio
             if (end.isBefore(start) || end.isEqual(start)) {
                 log.warn("Validazione fallita: end={} prima o uguale a start={}", end, start);
                 throw new IllegalArgumentException(
@@ -719,18 +744,23 @@ public class PrenotazioniService {
         }
     }
 
+    /**
+     * Verifica la disponibilitÃ  della sala per la prenotazione richiesta, escludendo l'evento in modifica.
+     */
     private void verificaDisponibilita(PrenotazioneRequestDTO request, String eventIdDaEscludere, Jwt jwt) {
         verificaDisponibilita(request, eventIdDaEscludere, null, jwt);
     }
 
+    /**
+     * Verifica che nessuna delle occorrenze generate dalla richiesta si sovrapponga a eventi esistenti nella sala.
+     * Esclude dal confronto l'identificativo dell'evento singolo o del master della serie in corso di modifica.
+     */
     private void verificaDisponibilita(PrenotazioneRequestDTO request, String eventIdDaEscludere, String seriesMasterIdDaEscludere, Jwt jwt) {
         String salaEmail = request.getSalaEmail();
         
-        // 1. Genera tutte le occorrenze previste per la prenotazione
         List<LocalDateTime[]> occorrenze = generaOccorrenze(request);
         if (occorrenze.isEmpty()) return;
 
-        // 2. Finestra temporale totale per la chiamata Graph API
         LocalDateTime startReq = LocalDateTime.parse(request.getStart().substring(0, 19));
         LocalDateTime endReq = LocalDateTime.parse(request.getEnd().substring(0, 19));
         LocalDateTime primoInizio = occorrenze.stream().map(o -> o[0]).min(LocalDateTime::compareTo).orElse(startReq);
@@ -740,10 +770,8 @@ public class PrenotazioniService {
         String filtroInizio = primoInizio.toLocalDate().atStartOfDay().format(formatoFiltro);
         String filtroFine = ultimaFine.toLocalDate().plusDays(1).atStartOfDay().format(formatoFiltro);
 
-        // 3. Recupera gli eventi nel maxi-periodo
         List<PrenotazioneDTO> eventiEsistenti = getPrenotazioni(salaEmail, filtroInizio, filtroFine, jwt);
 
-        // 4. Verifica sovrapposizioni per singola occorrenza
         for (LocalDateTime[] occorrenza : occorrenze) {
             LocalDateTime nuovoStart = occorrenza[0];
             LocalDateTime nuovoEnd = occorrenza[1];
@@ -762,7 +790,6 @@ public class PrenotazioniService {
                     .anyMatch(e -> {
                         if (e.getStart() == null || e.getEnd() == null) return false;
                         
-                        // Pulizia stringa per parse safe
                         String startPulito = e.getStart().length() > 19 ? e.getStart().substring(0, 19) : e.getStart();
                         String endPulito = e.getEnd().length() > 19 ? e.getEnd().substring(0, 19) : e.getEnd();
                         
@@ -779,8 +806,9 @@ public class PrenotazioniService {
         }
     }
 
-    // --- Metodi helper per permessi ---
-
+    /**
+     * Controlla i privilegi dell'utente richiedente, sollevando AccessDeniedException se non Ã¨ un amministratore.
+     */
     private void verificaAdmin(Jwt jwt) {
         if (!isAdmin(jwt)) {
             log.warn("Accesso negato: utente non admin tenta operazione riservata");
@@ -788,6 +816,10 @@ public class PrenotazioniService {
         }
     }
 
+    /**
+     * Verifica la presenza del ruolo di amministratore all'interno dei claims del token JWT,
+     * leggendo il ruolo configurato nell'ambiente (app.admin-role).
+     */
     private boolean isAdmin(Jwt jwt) {
         if (jwt == null) {
             return false;
@@ -799,6 +831,10 @@ public class PrenotazioniService {
         return ruoli != null && ruoli.contains(expectedRole);
     }
 
+    /**
+     * Recupera o inizializza il ReentrantLock associato a una sala, verificando preventivamente
+     * che la sala esista e appartenga all'elenco delle sale gestite da Exchange.
+     */
     private ReentrantLock getLockPerSala(String salaEmail) {
         if (salaEmail == null || salaEmail.isBlank()) {
             throw new IllegalArgumentException("L'email della sala non puo essere vuota.");
@@ -817,8 +853,8 @@ public class PrenotazioniService {
     }
 
     /**
-     * Rimuove i tag HTML da una stringa, estraendo solo il testo puro.
-     * Gestisce anche i casi in cui il contenuto sia solo testo senza tag.
+     * Rimuove i tag HTML dal corpo dell'evento Microsoft Graph convertendo i ritorni a capo in newline,
+     * senza ricreare caratteri che potrebbero essere interpretati come codice eseguibile.
      */
     private String stripHtml(String html) {
         if (html == null || html.isEmpty()) {
@@ -838,13 +874,17 @@ public class PrenotazioniService {
         testo = testo.replaceAll("[ \\t\\x0B\\f]+", " ").trim();
         return testo.isEmpty() ? null : testo;
     }
-    
+
+    /**
+     * Calcola la lista puntuale di tutte le occorrenze [data/ora inizio, data/ora fine]
+     * previste da una richiesta (evento singolo o espansione della ricorrenza daily/weekly/monthly).
+     */
     private List<LocalDateTime[]> generaOccorrenze(PrenotazioneRequestDTO request) {
         List<LocalDateTime[]> occorrenze = new ArrayList<>();
         LocalDateTime start = LocalDateTime.parse(request.getStart());
         LocalDateTime end = LocalDateTime.parse(request.getEnd());
-        
-        // Se \u00e8 un evento singolo, restituisce solo l'unica occorrenza
+
+        // Evento singolo o aggiornamento su singola occorrenza: restituisce unicamente la data dell'evento
         if ("SINGOLA".equalsIgnoreCase(request.getTipoModifica())
                 || request.getPattern() == null 
                 || request.getPattern().isBlank()
@@ -854,7 +894,6 @@ public class PrenotazioniService {
             return occorrenze;
         }
 
-        // Calcolo ricorrenze
         LocalDate dataFine = LocalDate.parse(request.getDataFine().substring(0, 10));
         int interval = request.getIntervallo() != null ? request.getIntervallo() : 1;
         long durationMinutes = java.time.Duration.between(start, end).toMinutes();
@@ -866,13 +905,11 @@ public class PrenotazioniService {
                 }
                 break;
             case "weekly":
-                // Usa java.time.DayOfWeek con FQDN per evitare conflitti con l'enum di Graph
                 LocalDate weekStart = start.toLocalDate().with(java.time.DayOfWeek.MONDAY);
                 for (LocalDate ws = weekStart; !ws.isAfter(dataFine); ws = ws.plusWeeks(interval)) {
                     for (String giorno : request.getGiorniSettimana()) {
                         java.time.DayOfWeek dow = java.time.DayOfWeek.valueOf(giorno.toUpperCase());
                         LocalDate d = ws.with(dow);
-                        // Filtra i giorni precedenti alla data di inizio effettiva o successivi alla fine
                         if (!d.isBefore(start.toLocalDate()) && !d.isAfter(dataFine)) {
                             occorrenze.add(new LocalDateTime[]{d.atTime(start.toLocalTime()), d.atTime(start.toLocalTime()).plusMinutes(durationMinutes)});
                         }
