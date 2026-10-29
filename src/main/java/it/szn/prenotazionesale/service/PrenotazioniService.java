@@ -36,8 +36,8 @@ import java.util.stream.Collectors;
  * Servizio per la gestione operativa delle prenotazioni delle sale riunioni.
  * Interagisce con Microsoft 365 Exchange Online tramite le API Microsoft Graph.
  *
- * ResponsabilitÃƒÂ  principali:
- * - Consultazione degli eventi e delle disponibilitÃƒÂ  (tramite calendarView per espansione ricorrenze).
+ * ResponsabilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  principali:
+ * - Consultazione degli eventi e delle disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  (tramite calendarView per espansione ricorrenze).
  * - Creazione, aggiornamento e cancellazione di prenotazioni singole e serie ricorrenti.
  * - Migrazione atomica di eventi tra sale diverse (cambio sala) con logica di rollback compensativo.
  * - Sincronizzazione thread-safe per singola sala tramite lock rientranti con timeout.
@@ -53,7 +53,7 @@ public class PrenotazioniService {
 
     /**
      * Mappa dei lock rientranti per singola sala.
-     * Serializza le operazioni di verifica disponibilitÃƒÂ  e successiva scrittura su Microsoft Graph
+     * Serializza le operazioni di verifica disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  e successiva scrittura su Microsoft Graph
      * per la medesima sala, prevenendo race condition da prenotazioni simultanee sovrapposte (TOCTOU).
      * Ogni lock opera in memoria locale con timeout per prevenire blocchi indefiniti dei thread.
      */
@@ -204,8 +204,8 @@ public class PrenotazioniService {
      * - Se la cancellazione fallisce, esegue un rollback compensativo rimuovendo il nuovo evento creato.
      *
      * In caso di Modifica sulla Stessa Sala:
-     * - Per le serie ricorrenti, aggiorna il Series Master preservando start ed end se l'orario non ÃƒÂ¨ variato,
-     *   cosÃƒÂ¬ da mantenere intatte le singole eccezioni giÃƒÂ  configurate nella serie.
+     * - Per le serie ricorrenti, aggiorna il Series Master preservando start ed end se l'orario non ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ variato,
+     *   cosÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ da mantenere intatte le singole eccezioni giÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  configurate nella serie.
      * - Per le singole occorrenze, aggiorna i dati specifici della data selezionata.
      *
      * @param eventId identificativo univoco dell'evento o occorrenza su Graph
@@ -258,7 +258,7 @@ public class PrenotazioniService {
                                 req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
                             });
 
-                    // Verifica preliminare di disponibilitÃƒÂ  della sala di destinazione per l'intera durata della serie
+                    // Verifica preliminare di disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  della sala di destinazione per l'intera durata della serie
                     PrenotazioneRequestDTO checkRequest = new PrenotazioneRequestDTO();
                     checkRequest.setSalaEmail(request.getSalaEmail());
                     checkRequest.setStart(masterOriginale.getStart().getDateTime());
@@ -381,7 +381,7 @@ public class PrenotazioniService {
             String tipoModifica = request.getTipoModifica();
             boolean modificaSerie = "SERIE".equals(tipoModifica);
 
-            // Esclude dal controllo di disponibilitÃƒÂ  l'evento stesso o il master della serie in modifica
+            // Esclude dal controllo di disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  l'evento stesso o il master della serie in modifica
             String seriesMasterIdDaEscludere = modificaSerie 
                     ? ((request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank()) ? request.getSeriesMasterId() : eventId)
                     : null;
@@ -427,8 +427,8 @@ public class PrenotazioniService {
                             .plusMinutes(durataMinuti);
                     nuovoEndDateTime = nuovoEndLDT.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
 
-                    // Se l'orario ÃƒÂ¨ invariato (solo titolo o descrizione modificati), non invia start/end
-                    // nel PATCH per preservare eventuali eccezioni di date giÃƒÂ  modificate nella serie
+                    // Se l'orario ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ invariato (solo titolo o descrizione modificati), non invia start/end
+                    // nel PATCH per preservare eventuali eccezioni di date giÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  modificate nella serie
                     String masterStartOriginale = existingMaster.getStart() != null ? existingMaster.getStart().getDateTime() : "";
                     if (masterStartOriginale.length() >= 19 && masterStartOriginale.substring(11, 19).equals(nuovoOrario)) {
                         orarioModificato = false;
@@ -499,7 +499,7 @@ public class PrenotazioniService {
 
     /**
      * Cancella una prenotazione o una serie ricorrente.
-     * Overload di comoditÃƒÂ  per default tipo 'SERIE'.
+     * Overload di comoditÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  per default tipo 'SERIE'.
      */
     public void cancellaPrenotazione(String eventId, String salaEmail, Jwt jwt) {
         cancellaPrenotazione(eventId, salaEmail, "SERIE", null, jwt);
@@ -533,9 +533,74 @@ public class PrenotazioniService {
                     ? seriesMasterId
                     : eventId;
 
-            graphClient.users().byUserId(salaEmail).events().byEventId(idSuCuiOperare).delete();
-            log.info("Prenotazione {} cancellata dalla sala {} (tipo richiesto: {})", idSuCuiOperare, salaEmail,
-                    tipoCancellazione);
+            // Recupera l'evento dalla sala per verificare se l'organizzatore ÃƒÂ¨ un utente esterno/Outlook
+            Event eventoDaCancellare = null;
+            try {
+                eventoDaCancellare = graphClient.users().byUserId(salaEmail).events().byEventId(idSuCuiOperare).get(req -> {
+                    req.queryParameters.select = new String[]{"id", "isOrganizer", "organizer", "iCalUId", "seriesMasterId", "start", "end"};
+                });
+            } catch (Exception e) {
+                log.warn("Impossibile recuperare metadati preliminari dell'evento {} per sala {}: {}", idSuCuiOperare, salaEmail, e.getMessage());
+            }
+
+            boolean cancellatoDaOrganizzatore = false;
+            if (eventoDaCancellare != null) {
+                boolean isOrganizer = Boolean.TRUE.equals(eventoDaCancellare.getIsOrganizer());
+                String organizerEmail = (eventoDaCancellare.getOrganizer() != null && eventoDaCancellare.getOrganizer().getEmailAddress() != null)
+                        ? eventoDaCancellare.getOrganizer().getEmailAddress().getAddress()
+                        : null;
+                String iCalUId = eventoDaCancellare.getICalUId();
+
+                // Se la sala non ÃƒÂ¨ l'organizzatore (evento creato da Outlook personale di un utente)
+                if (!isOrganizer && organizerEmail != null && !organizerEmail.equalsIgnoreCase(salaEmail) && iCalUId != null && !iCalUId.isBlank()) {
+                    log.info("L'evento {} appartiene al calendario personale di {} (iCalUId: {}). Rimozione alla radice.",
+                            idSuCuiOperare, organizerEmail, iCalUId);
+                    try {
+                        final String startIso = (eventoDaCancellare.getStart() != null) ? eventoDaCancellare.getStart().getDateTime() : null;
+                        final String endIso = (eventoDaCancellare.getEnd() != null) ? eventoDaCancellare.getEnd().getDateTime() : null;
+                        final String finalICalUId = iCalUId;
+
+                        List<Event> eventiOrganizzatore = null;
+                        if ("SINGOLA".equals(tipoCancellazione) && startIso != null && endIso != null) {
+                            var viewPage = graphClient.users().byUserId(organizerEmail).calendarView().get(req -> {
+                                req.queryParameters.startDateTime = startIso;
+                                req.queryParameters.endDateTime = endIso;
+                                req.queryParameters.filter = "iCalUId eq '" + finalICalUId + "'";
+                            });
+                            eventiOrganizzatore = viewPage != null ? viewPage.getValue() : null;
+                        } else {
+                            var eventsPage = graphClient.users().byUserId(organizerEmail).events().get(req -> {
+                                req.queryParameters.filter = "iCalUId eq '" + finalICalUId + "'";
+                            });
+                            eventiOrganizzatore = eventsPage != null ? eventsPage.getValue() : null;
+                        }
+
+                        if (eventiOrganizzatore != null && !eventiOrganizzatore.isEmpty()) {
+                            for (Event orgEvent : eventiOrganizzatore) {
+                                graphClient.users().byUserId(organizerEmail).events().byEventId(orgEvent.getId()).delete();
+                                log.info("Evento {} cancellato con successo dal calendario dell'organizzatore {}", orgEvent.getId(), organizerEmail);
+                            }
+                            cancellatoDaOrganizzatore = true;
+                        }
+                    } catch (Exception exOrg) {
+                        log.warn("Impossibile cancellare l'evento dal calendario dell'organizzatore {}: {}. Si procede con la rimozione diretta dalla sala.",
+                                organizerEmail, exOrg.getMessage());
+                    }
+                }
+            }
+
+            // Rimuove la copia dalla sala (se non giÃƒÂ  rimossa a catena da Exchange)
+            try {
+                graphClient.users().byUserId(salaEmail).events().byEventId(idSuCuiOperare).delete();
+                log.info("Prenotazione {} cancellata dalla sala {} (tipo richiesto: {})", idSuCuiOperare, salaEmail,
+                        tipoCancellazione);
+            } catch (ApiException apiEx) {
+                if (apiEx.getResponseStatusCode() == 404 && cancellatoDaOrganizzatore) {
+                    log.info("L'evento {} della sala {} risulta giÃƒÂ  rimosso da Exchange in seguito alla cancellazione dell'organizzatore.", idSuCuiOperare, salaEmail);
+                } else {
+                    throw apiEx;
+                }
+            }
 
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
@@ -746,7 +811,7 @@ public class PrenotazioniService {
     }
 
     /**
-     * Verifica la disponibilitÃƒÂ  della sala per la prenotazione richiesta, escludendo l'evento in modifica.
+     * Verifica la disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  della sala per la prenotazione richiesta, escludendo l'evento in modifica.
      */
     private void verificaDisponibilita(PrenotazioneRequestDTO request, String eventIdDaEscludere, Jwt jwt) {
         verificaDisponibilita(request, eventIdDaEscludere, null, jwt);
@@ -808,7 +873,7 @@ public class PrenotazioniService {
     }
 
     /**
-     * Controlla i privilegi dell'utente richiedente, sollevando AccessDeniedException se non ÃƒÂ¨ un amministratore.
+     * Controlla i privilegi dell'utente richiedente, sollevando AccessDeniedException se non ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ un amministratore.
      */
     private void verificaAdmin(Jwt jwt) {
         if (!isAdmin(jwt)) {
