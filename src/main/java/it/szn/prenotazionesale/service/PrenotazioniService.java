@@ -2,6 +2,7 @@ package it.szn.prenotazionesale.service;
 
 import com.microsoft.graph.models.*;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
+import com.microsoft.kiota.ApiException;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
 import it.szn.prenotazionesale.config.AppConfig;
@@ -35,8 +36,8 @@ import java.util.stream.Collectors;
  * Servizio per la gestione operativa delle prenotazioni delle sale riunioni.
  * Interagisce con Microsoft 365 Exchange Online tramite le API Microsoft Graph.
  *
- * ResponsabilitÃ  principali:
- * - Consultazione degli eventi e delle disponibilitÃ  (tramite calendarView per espansione ricorrenze).
+ * ResponsabilitÃƒÂ  principali:
+ * - Consultazione degli eventi e delle disponibilitÃƒÂ  (tramite calendarView per espansione ricorrenze).
  * - Creazione, aggiornamento e cancellazione di prenotazioni singole e serie ricorrenti.
  * - Migrazione atomica di eventi tra sale diverse (cambio sala) con logica di rollback compensativo.
  * - Sincronizzazione thread-safe per singola sala tramite lock rientranti con timeout.
@@ -52,7 +53,7 @@ public class PrenotazioniService {
 
     /**
      * Mappa dei lock rientranti per singola sala.
-     * Serializza le operazioni di verifica disponibilitÃ  e successiva scrittura su Microsoft Graph
+     * Serializza le operazioni di verifica disponibilitÃƒÂ  e successiva scrittura su Microsoft Graph
      * per la medesima sala, prevenendo race condition da prenotazioni simultanee sovrapposte (TOCTOU).
      * Ogni lock opera in memoria locale con timeout per prevenire blocchi indefiniti dei thread.
      */
@@ -134,12 +135,15 @@ public class PrenotazioniService {
                 .map(sala -> CompletableFuture.supplyAsync(() -> {
                     try {
                         return getPrenotazioni(sala.getEmail(), dataInizio, dataFine, jwt);
+                    } catch (ApiException e) {
+                        log.error("Errore Graph API (status {}) per sala {}: {}", e.getResponseStatusCode(), sala.getEmail(), e.getMessage());
+                        throw e;
                     } catch (Exception e) {
-                        log.error("Errore nel recupero prenotazioni per la sala {}: {}", sala.getEmail(),
-                                e.getMessage(), e);
-                        return List.<PrenotazioneDTO>of();
+                        log.error("Errore recupero prenotazioni per sala {}: {}", sala.getEmail(), e.getMessage(), e);
+                        throw new RuntimeException("Errore recupero prenotazioni per sala " + sala.getNome() + ": " + e.getMessage(), e);
                     }
-                }, executorGraphParallelo))
+                }, executorGraphParallelo)
+                .orTimeout(12, TimeUnit.SECONDS))
                 .collect(Collectors.toList());
 
         return futures.stream()
@@ -200,8 +204,8 @@ public class PrenotazioniService {
      * - Se la cancellazione fallisce, esegue un rollback compensativo rimuovendo il nuovo evento creato.
      *
      * In caso di Modifica sulla Stessa Sala:
-     * - Per le serie ricorrenti, aggiorna il Series Master preservando start ed end se l'orario non Ã¨ variato,
-     *   cosÃ¬ da mantenere intatte le singole eccezioni giÃ  configurate nella serie.
+     * - Per le serie ricorrenti, aggiorna il Series Master preservando start ed end se l'orario non ÃƒÂ¨ variato,
+     *   cosÃƒÂ¬ da mantenere intatte le singole eccezioni giÃƒÂ  configurate nella serie.
      * - Per le singole occorrenze, aggiorna i dati specifici della data selezionata.
      *
      * @param eventId identificativo univoco dell'evento o occorrenza su Graph
@@ -254,7 +258,7 @@ public class PrenotazioniService {
                                 req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
                             });
 
-                    // Verifica preliminare di disponibilitÃ  della sala di destinazione per l'intera durata della serie
+                    // Verifica preliminare di disponibilitÃƒÂ  della sala di destinazione per l'intera durata della serie
                     PrenotazioneRequestDTO checkRequest = new PrenotazioneRequestDTO();
                     checkRequest.setSalaEmail(request.getSalaEmail());
                     checkRequest.setStart(masterOriginale.getStart().getDateTime());
@@ -377,7 +381,7 @@ public class PrenotazioniService {
             String tipoModifica = request.getTipoModifica();
             boolean modificaSerie = "SERIE".equals(tipoModifica);
 
-            // Esclude dal controllo di disponibilitÃ  l'evento stesso o il master della serie in modifica
+            // Esclude dal controllo di disponibilitÃƒÂ  l'evento stesso o il master della serie in modifica
             String seriesMasterIdDaEscludere = modificaSerie 
                     ? ((request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank()) ? request.getSeriesMasterId() : eventId)
                     : null;
@@ -423,8 +427,8 @@ public class PrenotazioniService {
                             .plusMinutes(durataMinuti);
                     nuovoEndDateTime = nuovoEndLDT.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
 
-                    // Se l'orario Ã¨ invariato (solo titolo o descrizione modificati), non invia start/end
-                    // nel PATCH per preservare eventuali eccezioni di date giÃ  modificate nella serie
+                    // Se l'orario ÃƒÂ¨ invariato (solo titolo o descrizione modificati), non invia start/end
+                    // nel PATCH per preservare eventuali eccezioni di date giÃƒÂ  modificate nella serie
                     String masterStartOriginale = existingMaster.getStart() != null ? existingMaster.getStart().getDateTime() : "";
                     if (masterStartOriginale.length() >= 19 && masterStartOriginale.substring(11, 19).equals(nuovoOrario)) {
                         orarioModificato = false;
@@ -495,7 +499,7 @@ public class PrenotazioniService {
 
     /**
      * Cancella una prenotazione o una serie ricorrente.
-     * Overload di comoditÃ  per default tipo 'SERIE'.
+     * Overload di comoditÃƒÂ  per default tipo 'SERIE'.
      */
     public void cancellaPrenotazione(String eventId, String salaEmail, Jwt jwt) {
         cancellaPrenotazione(eventId, salaEmail, "SERIE", null, jwt);
@@ -742,7 +746,7 @@ public class PrenotazioniService {
     }
 
     /**
-     * Verifica la disponibilitÃ  della sala per la prenotazione richiesta, escludendo l'evento in modifica.
+     * Verifica la disponibilitÃƒÂ  della sala per la prenotazione richiesta, escludendo l'evento in modifica.
      */
     private void verificaDisponibilita(PrenotazioneRequestDTO request, String eventIdDaEscludere, Jwt jwt) {
         verificaDisponibilita(request, eventIdDaEscludere, null, jwt);
@@ -804,7 +808,7 @@ public class PrenotazioniService {
     }
 
     /**
-     * Controlla i privilegi dell'utente richiedente, sollevando AccessDeniedException se non Ã¨ un amministratore.
+     * Controlla i privilegi dell'utente richiedente, sollevando AccessDeniedException se non ÃƒÂ¨ un amministratore.
      */
     private void verificaAdmin(Jwt jwt) {
         if (!isAdmin(jwt)) {
