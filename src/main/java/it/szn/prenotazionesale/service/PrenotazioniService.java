@@ -88,6 +88,10 @@ public class PrenotazioniService {
             "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?(Z|[+-]\\d{2}:\\d{2})?$");
 
     private static final Pattern PATTERN_ICALUID_SICURO = Pattern.compile("^[A-Za-z0-9._~@+=/-]{1,255}$");
+    private static final long MAX_RANGE_GIORNI = 370L;
+    private static final long MAX_DURATA_RICORRENZA_GIORNI = 365L;
+    private static final int MAX_INTERVALLO = 52;
+    private static final int MAX_OCCORRENZE = 366;
 
     private String escapeODataString(String valore) {
         if (valore == null) {
@@ -107,6 +111,34 @@ public class PrenotazioniService {
             throw new IllegalArgumentException(
                     "Errore: il parametro '" + nomeParametro
                             + "' deve essere una data/ora in formato ISO-8601 valido.");
+        }
+    }
+
+    /**
+     * Protezione DoS (SEC-05): convalida formato, ordine cronologico e ampiezza massima
+     * dell'intervallo temporale su calendarView per impedire espansioni di memoria illimitate.
+     */
+    private void validaIntervalloDate(String dataInizioStr, String dataFineStr) {
+        validaParametroFiltroData(dataInizioStr, "dataInizio");
+        validaParametroFiltroData(dataFineStr, "dataFine");
+
+        try {
+            LocalDateTime inizio = LocalDateTime.parse(dataInizioStr.substring(0, 19));
+            LocalDateTime fine = LocalDateTime.parse(dataFineStr.substring(0, 19));
+
+            if (!inizio.isBefore(fine)) {
+                throw new IllegalArgumentException("Errore: la data di inizio deve essere antecedente alla data di fine.");
+            }
+
+            long giorni = java.time.Duration.between(inizio, fine).toDays();
+            if (giorni > MAX_RANGE_GIORNI) {
+                log.warn("Richiesta calendario respinta: ampiezza {} giorni eccede il massimo consentito ({})",
+                        giorni, MAX_RANGE_GIORNI);
+                throw new IllegalArgumentException(
+                        "Errore: l'intervallo temporale di consultazione non puo superare " + MAX_RANGE_GIORNI + " giorni.");
+            }
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("Errore: formato data non valido. Utilizzare lo standard ISO-8601.");
         }
     }
 
@@ -153,8 +185,7 @@ public class PrenotazioniService {
         log.info("Richiesta prenotazioni per sala {} dal {} al {}", salaEmail, dataInizio, dataFine);
 
         validaSalaAutorizzata(salaEmail);
-        validaParametroFiltroData(dataInizio, "dataInizio");
-        validaParametroFiltroData(dataFine, "dataFine");
+        validaIntervalloDate(dataInizio, dataFine);
 
         String salaNormalizzata = salaEmail.trim().toLowerCase();
         var events = graphClient.users().byUserId(salaNormalizzata).calendarView().get(req -> {
@@ -912,19 +943,34 @@ public class PrenotazioniService {
                 throw new IllegalArgumentException(
                         "Errore: la data di fine ricorrenza deve essere successiva o uguale alla data di inizio.");
             }
+            long giorniDifferenza = java.time.temporal.ChronoUnit.DAYS.between(startDate, endDate);
+            if (giorniDifferenza > MAX_DURATA_RICORRENZA_GIORNI) {
+                throw new IllegalArgumentException(
+                        "Errore: una serie ricorrente puo estendersi al massimo per "
+                                + MAX_DURATA_RICORRENZA_GIORNI + " giorni (1 anno).");
+            }
         } catch (DateTimeParseException e) {
             log.warn("Validazione fallita: formato data non valido in validaRicorrenza: start={}, dataFine={}",
                     request.getStart(), request.getDataFine());
             throw new IllegalArgumentException("Errore: formato data non valido per la ricorrenza.");
         }
 
-        if ("weekly".equalsIgnoreCase(pattern)
-                && (request.getGiorniSettimana() == null || request.getGiorniSettimana().isEmpty())) {
-            throw new IllegalArgumentException("Per la ricorrenza settimanale devi selezionare almeno un giorno.");
+        if ("weekly".equalsIgnoreCase(pattern)) {
+            if (request.getGiorniSettimana() == null || request.getGiorniSettimana().isEmpty()) {
+                throw new IllegalArgumentException("Per la ricorrenza settimanale devi selezionare almeno un giorno.");
+            }
+            List<String> giorniValidi = List.of("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY");
+            for (String g : request.getGiorniSettimana()) {
+                if (g == null || !giorniValidi.contains(g.toUpperCase())) {
+                    throw new IllegalArgumentException("Giorno della settimana non valido: " + g);
+                }
+            }
         }
 
-        if (request.getIntervallo() != null && request.getIntervallo() < 1) {
-            throw new IllegalArgumentException("L'intervallo deve essere almeno 1.");
+        if (request.getIntervallo() != null
+                && (request.getIntervallo() < 1 || request.getIntervallo() > MAX_INTERVALLO)) {
+            throw new IllegalArgumentException(
+                    "L'intervallo di ricorrenza deve essere compreso tra 1 e " + MAX_INTERVALLO + ".");
         }
     }
 
@@ -1120,20 +1166,23 @@ public class PrenotazioniService {
         }
 
         LocalDate dataFine = LocalDate.parse(request.getDataFine().substring(0, 10));
-        int interval = request.getIntervallo() != null ? request.getIntervallo() : 1;
+        int interval = (request.getIntervallo() != null && request.getIntervallo() >= 1) ? request.getIntervallo() : 1;
         long durationMinutes = java.time.Duration.between(start, end).toMinutes();
 
         switch (request.getPattern().toLowerCase()) {
             case "daily":
-                for (LocalDate d = start.toLocalDate(); !d.isAfter(dataFine); d = d.plusDays(interval)) {
+                for (LocalDate d = start.toLocalDate(); !d.isAfter(dataFine) && occorrenze.size() < MAX_OCCORRENZE; d = d.plusDays(interval)) {
                     occorrenze.add(new LocalDateTime[] { d.atTime(start.toLocalTime()),
                             d.atTime(start.toLocalTime()).plusMinutes(durationMinutes) });
                 }
                 break;
             case "weekly":
                 LocalDate weekStart = start.toLocalDate().with(java.time.DayOfWeek.MONDAY);
-                for (LocalDate ws = weekStart; !ws.isAfter(dataFine); ws = ws.plusWeeks(interval)) {
+                for (LocalDate ws = weekStart; !ws.isAfter(dataFine) && occorrenze.size() < MAX_OCCORRENZE; ws = ws.plusWeeks(interval)) {
                     for (String giorno : request.getGiorniSettimana()) {
+                        if (occorrenze.size() >= MAX_OCCORRENZE) {
+                            break;
+                        }
                         java.time.DayOfWeek dow = java.time.DayOfWeek.valueOf(giorno.toUpperCase());
                         LocalDate d = ws.with(dow);
                         if (!d.isBefore(start.toLocalDate()) && !d.isAfter(dataFine)) {
@@ -1146,7 +1195,7 @@ public class PrenotazioniService {
             case "monthly":
                 LocalDate baseDate = start.toLocalDate();
                 int monthStep = 0;
-                while (true) {
+                while (occorrenze.size() < MAX_OCCORRENZE) {
                     LocalDate d = baseDate.plusMonths((long) monthStep * interval);
                     if (d.isAfter(dataFine))
                         break;
