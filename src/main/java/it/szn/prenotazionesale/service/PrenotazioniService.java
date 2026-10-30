@@ -87,6 +87,15 @@ public class PrenotazioniService {
     private static final Pattern PATTERN_DATA_FILTRO = Pattern.compile(
             "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?(Z|[+-]\\d{2}:\\d{2})?$");
 
+    private static final Pattern PATTERN_ICALUID_SICURO = Pattern.compile("^[A-Za-z0-9._~@+=/-]{1,255}$");
+
+    private String escapeODataString(String valore) {
+        if (valore == null) {
+            return "";
+        }
+        return valore.replace("'", "''");
+    }
+
     /**
      * Verifica che una stringa temporale rispetti il formato ISO-8601 consentito
      * per i filtri Graph.
@@ -645,50 +654,60 @@ public class PrenotazioniService {
                                 : null;
                 String iCalUId = eventoDaCancellare.getICalUId();
 
-                // Se la sala non ÃƒÆ’Ã‚Â¨ l'organizzatore (evento creato da Outlook personale di un
+                // Se la sala non e l'organizzatore (evento creato da Outlook personale di un
                 // utente)
                 if (!isOrganizer && organizerEmail != null && !organizerEmail.equalsIgnoreCase(salaEmail)
                         && iCalUId != null && !iCalUId.isBlank()) {
-                    log.info(
-                            "L'evento {} appartiene al calendario personale di {} (iCalUId: {}). Rimozione alla radice.",
-                            idSuCuiOperare, organizerEmail, iCalUId);
-                    try {
-                        final String startIso = (eventoDaCancellare.getStart() != null)
-                                ? eventoDaCancellare.getStart().getDateTime()
-                                : null;
-                        final String endIso = (eventoDaCancellare.getEnd() != null)
-                                ? eventoDaCancellare.getEnd().getDateTime()
-                                : null;
-                        final String finalICalUId = iCalUId;
-
-                        List<Event> eventiOrganizzatore = null;
-                        if ("SINGOLA".equals(tipoCancellazione) && startIso != null && endIso != null) {
-                            var viewPage = graphClient.users().byUserId(organizerEmail).calendarView().get(req -> {
-                                req.queryParameters.startDateTime = startIso;
-                                req.queryParameters.endDateTime = endIso;
-                                req.queryParameters.filter = "iCalUId eq '" + finalICalUId + "'";
-                            });
-                            eventiOrganizzatore = viewPage != null ? viewPage.getValue() : null;
-                        } else {
-                            var eventsPage = graphClient.users().byUserId(organizerEmail).events().get(req -> {
-                                req.queryParameters.filter = "iCalUId eq '" + finalICalUId + "'";
-                            });
-                            eventiOrganizzatore = eventsPage != null ? eventsPage.getValue() : null;
-                        }
-
-                        if (eventiOrganizzatore != null && !eventiOrganizzatore.isEmpty()) {
-                            for (Event orgEvent : eventiOrganizzatore) {
-                                graphClient.users().byUserId(organizerEmail).events().byEventId(orgEvent.getId())
-                                        .delete();
-                                log.info("Evento {} cancellato con successo dal calendario dell'organizzatore {}",
-                                        orgEvent.getId(), organizerEmail);
-                            }
-                            cancellatoDaOrganizzatore = true;
-                        }
-                    } catch (Exception exOrg) {
+                    if (!PATTERN_ICALUID_SICURO.matcher(iCalUId).matches()) {
                         log.warn(
-                                "Impossibile cancellare l'evento dal calendario dell'organizzatore {}: {}. Si procede con la rimozione diretta dalla sala.",
-                                organizerEmail, exOrg.getMessage());
+                                "UID evento {} contiene caratteri non validi per il filtro OData. Cancellazione automatica organizzatore ignorata.",
+                                idSuCuiOperare);
+                    } else {
+                        log.info(
+                                "L'evento {} appartiene al calendario personale di {} (iCalUId: {}). Rimozione alla radice.",
+                                idSuCuiOperare, organizerEmail, iCalUId);
+                        try {
+                            final String startIso = (eventoDaCancellare.getStart() != null)
+                                    ? eventoDaCancellare.getStart().getDateTime()
+                                    : null;
+                            final String endIso = (eventoDaCancellare.getEnd() != null)
+                                    ? eventoDaCancellare.getEnd().getDateTime()
+                                    : null;
+                            final String oDataFilter = "iCalUId eq '" + escapeODataString(iCalUId) + "'";
+
+                            List<Event> eventiOrganizzatore = null;
+                            if ("SINGOLA".equals(tipoCancellazione) && startIso != null && endIso != null) {
+                                var viewPage = graphClient.users().byUserId(organizerEmail).calendarView().get(req -> {
+                                    req.queryParameters.startDateTime = startIso;
+                                    req.queryParameters.endDateTime = endIso;
+                                    req.queryParameters.filter = oDataFilter;
+                                });
+                                eventiOrganizzatore = viewPage != null ? viewPage.getValue() : null;
+                            } else {
+                                var eventsPage = graphClient.users().byUserId(organizerEmail).events().get(req -> {
+                                    req.queryParameters.filter = oDataFilter;
+                                });
+                                eventiOrganizzatore = eventsPage != null ? eventsPage.getValue() : null;
+                            }
+
+                            if (eventiOrganizzatore != null && !eventiOrganizzatore.isEmpty()) {
+                                for (Event orgEvent : eventiOrganizzatore) {
+                                    if (iCalUId.equalsIgnoreCase(orgEvent.getICalUId())) {
+                                        graphClient.users().byUserId(organizerEmail).events()
+                                                .byEventId(orgEvent.getId())
+                                                .delete();
+                                        log.info(
+                                                "Evento {} cancellato con successo dal calendario dell'organizzatore {}",
+                                                orgEvent.getId(), organizerEmail);
+                                    }
+                                }
+                                cancellatoDaOrganizzatore = true;
+                            }
+                        } catch (Exception exOrg) {
+                            log.warn(
+                                    "Impossibile cancellare l'evento dal calendario dell'organizzatore {}: {}. Si procede con la rimozione diretta dalla sala.",
+                                    organizerEmail, exOrg.getMessage());
+                        }
                     }
                 }
             }
