@@ -3,9 +3,11 @@ package it.szn.prenotazionesale.config;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
+import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
 import org.springframework.security.oauth2.core.OAuth2Error;
 import org.springframework.security.oauth2.core.OAuth2TokenValidator;
@@ -18,6 +20,7 @@ import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -25,6 +28,7 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import lombok.AllArgsConstructor;
 
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 
 @AllArgsConstructor
@@ -40,8 +44,28 @@ public class SecurityConfig {
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
+            // 1. CORS restrittivo e sicuro
             .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+
+            // 2. Disabilitazione CSRF sicura (API 100% Stateless basata su Bearer Token)
             .csrf(csrf -> csrf.disable())
+
+            // 3. Imposizione rigida dell'assenza di stato: nessuna HttpSession memorizzata
+            .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+
+            // 4. Header di sicurezza HTTP (Anti-Clickjacking, NoSniff, CSP, Referrer-Policy)
+            .headers(headers -> headers
+                .frameOptions(frame -> frame.deny())
+                .contentTypeOptions(Customizer.withDefaults())
+                .referrerPolicy(referrer -> referrer
+                    .policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN)
+                )
+                .contentSecurityPolicy(csp -> csp
+                    .policyDirectives("default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+                )
+            )
+
+            // 5. Regole di autorizzazione perimetrali su ruoli ed endpoint
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/prenotazioni/**").hasRole("RoomBooking.Admin")
@@ -51,10 +75,14 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.GET, "/api/prenotazioni/**").authenticated()
                 .anyRequest().authenticated()
             )
+
+            // 6. Intercettazione e audit dei rifiuti 401 e 403 a livello di servlet filter
             .exceptionHandling(exceptions -> exceptions
                 .authenticationEntryPoint(authenticationEntryPoint)
                 .accessDeniedHandler(accessDeniedHandler)
             )
+
+            // 7. Configurazione Resource Server OAuth2 con JwtDecoder hardened
             .oauth2ResourceServer(oauth2 -> oauth2
                 .jwt(jwt -> jwt
                     .decoder(jwtDecoder())
@@ -120,13 +148,41 @@ public class SecurityConfig {
         return converter;
     }
 
+    /**
+     * Configurazione CORS protetta:
+     * - Whitelist esplicita degli header consentiti (no wildcard '*')
+     * - Disabilitazione credenziali cookie non necessarie (allowCredentials=false)
+     * - Caching delle risposte preflight per 3600 secondi (riduzione latenza)
+     * - Esposizione dell'header Retry-After per il client frontend in caso di rate limiting
+     */
     @Bean
     CorsConfigurationSource corsConfigurationSource() {
         var config = new CorsConfiguration();
-        config.setAllowedOrigins(List.of(appConfig.getCors().getAllowedOrigins()));
+
+        String allowedOriginsConfig = appConfig.getCors().getAllowedOrigins();
+        if (allowedOriginsConfig != null && !allowedOriginsConfig.isBlank()) {
+            List<String> origins = Arrays.stream(allowedOriginsConfig.split(","))
+                    .map(s -> s.trim())
+                    .filter(s -> !s.isEmpty())
+                    .toList();
+            config.setAllowedOrigins(origins);
+        } else {
+            config.setAllowedOrigins(List.of("http://localhost:5173"));
+        }
+
         config.setAllowedMethods(List.of("GET", "POST", "PATCH", "DELETE", "OPTIONS"));
-        config.setAllowedHeaders(List.of("*"));
-        config.setAllowCredentials(true);
+        config.setAllowedHeaders(List.of(
+            "Authorization",
+            "Content-Type",
+            "Accept",
+            "Origin",
+            "X-Requested-With",
+            "Access-Control-Request-Method",
+            "Access-Control-Request-Headers"
+        ));
+        config.setExposedHeaders(List.of("Retry-After", "Location"));
+        config.setAllowCredentials(false);
+        config.setMaxAge(3600L);
 
         var source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);
