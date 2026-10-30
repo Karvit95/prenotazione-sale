@@ -1119,28 +1119,39 @@ public class PrenotazioniService {
     }
 
     /**
-     * Rimuove i tag HTML dal corpo dell'evento Microsoft Graph convertendo i
-     * ritorni a capo in newline,
-     * senza ricreare caratteri che potrebbero essere interpretati come codice
-     * eseguibile.
+     * Parser lineare O(N) anti-ReDoS per la rimozione dei tag HTML dal corpo
+     * dell'evento Microsoft Graph, senza backtracking esponenziale.
      */
     private String stripHtml(String html) {
-        if (html == null || html.isEmpty()) {
-            return html;
+        if (html == null || html.isBlank()) {
+            return null;
         }
         String testo = html.replaceAll("(?i)<br\\s*/?>", "\n")
-                .replaceAll("(?i)</p>", "\n")
+                .replaceAll("(?i)</p>", "\n\n")
                 .replaceAll("(?i)</div>", "\n");
-        while (testo.matches("(?s).*<[^>]*>.*")) {
-            testo = testo.replaceAll("<[^>]*>", "");
+
+        StringBuilder sb = new StringBuilder(testo.length());
+        boolean insideTag = false;
+        for (int i = 0; i < testo.length(); i++) {
+            char c = testo.charAt(i);
+            if (c == '<') {
+                insideTag = true;
+            } else if (c == '>') {
+                insideTag = false;
+            } else if (!insideTag) {
+                sb.append(c);
+            }
         }
-        testo = testo.replace("\u00a0", " ");
-        testo = testo.replace("&nbsp;", " ");
-        testo = testo.replace("&amp;", "&");
-        testo = testo.replace("&quot;", "\"");
-        testo = testo.replace("&#39;", "'");
-        testo = testo.replaceAll("[ \\t\\x0B\\f]+", " ").trim();
-        return testo.isEmpty() ? null : testo;
+
+        String pulito = sb.toString()
+                .replace("\u00a0", " ")
+                .replace("&nbsp;", " ")
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replaceAll("[ \\t\\x0B\\f]+", " ")
+                .trim();
+        return pulito.isBlank() ? null : pulito;
     }
 
     /**
