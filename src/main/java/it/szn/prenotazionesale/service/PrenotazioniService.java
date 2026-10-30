@@ -250,7 +250,8 @@ public class PrenotazioniService {
      * @return DTO dell'evento creato
      */
     public PrenotazioneDTO creaPrenotazione(PrenotazioneRequestDTO request, Jwt jwt) {
-        log.info("Creazione prenotazione per sala {} - titolo: {}", request.getSalaEmail(), request.getTitolo());
+        log.info("Creazione prenotazione per sala {} - intervallo: {} -> {}", request.getSalaEmail(),
+                request.getStart(), request.getEnd());
         verificaAdmin(jwt);
         validaOrariPrenotazione(request.getStart(), request.getEnd());
 
@@ -777,7 +778,7 @@ public class PrenotazioniService {
      * (Daily, Weekly, Monthly).
      */
     private Event buildEvent(PrenotazioneRequestDTO request) {
-        log.debug("Costruzione evento: titolo={}, start={}, end={}", request.getTitolo(), request.getStart(),
+        log.debug("Costruzione evento per sala {}: start={}, end={}", request.getSalaEmail(), request.getStart(),
                 request.getEnd());
         var event = new Event();
         event.setSubject(request.getTitolo());
