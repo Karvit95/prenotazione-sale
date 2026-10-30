@@ -464,7 +464,8 @@ public class PrenotazioniService {
                                 .byEventId(nuovaPrenotazione.getId()).delete();
                         log.info("Rollback completato con successo: eliminato evento {}", nuovaPrenotazione.getId());
                     } catch (Exception rollbackEx) {
-                        log.error("Rollback fallito per ID {}: {}", nuovaPrenotazione.getId(), rollbackEx.getMessage());
+                        log.error("[SECURITY_INCIDENT - ROLLBACK_FAILURE] Rollback fallito per ID {} su sala {}: {}",
+                                nuovaPrenotazione.getId(), request.getSalaEmail(), rollbackEx.getMessage());
                     }
                     throw new IllegalStateException(
                             "Impossibile completare il cambio sala: cancellazione fallita sulla sala precedente.", e);

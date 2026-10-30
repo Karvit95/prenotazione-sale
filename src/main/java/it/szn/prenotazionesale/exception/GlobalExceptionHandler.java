@@ -1,8 +1,11 @@
 package it.szn.prenotazionesale.exception;
 
 import com.microsoft.kiota.ApiException;
+import it.szn.prenotazionesale.audit.SecurityAuditService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
@@ -10,19 +13,30 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeoutException;
 
 /**
  * Controller Advice globale per l'intercettazione centralizzata e la gestione uniforme
  * delle eccezioni applicative, di validazione, di sicurezza e di integrazione con Microsoft Graph.
+ * Garantisce assenza di Information Disclosure (SEC-09) e classificazione incidenti NIS 2 (SEC-11).
  */
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
-    // Errori di business/validazione lanciati esplicitamente dal service
-    // (es. orari non validi, sala già occupata)
+    private final SecurityAuditService auditService;
+
+    @Autowired
+    public GlobalExceptionHandler(SecurityAuditService auditService) {
+        this.auditService = auditService;
+    }
+
+    public GlobalExceptionHandler() {
+        this.auditService = new SecurityAuditService();
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<ErrorResponse> handleIllegalArgument(IllegalArgumentException ex) {
         log.warn("Richiesta non valida: {}", ex.getMessage());
@@ -31,7 +45,6 @@ public class GlobalExceptionHandler {
                 .body(ErrorResponse.of(HttpStatus.BAD_REQUEST.value(), ex.getMessage()));
     }
 
-    // Validazione automatica dei DTO (@NotBlank, ecc.)
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException ex) {
         String message = ex.getBindingResult().getFieldErrors().stream()
@@ -49,45 +62,56 @@ public class GlobalExceptionHandler {
         log.warn("Violazione di vincolo: {}", ex.getMessage());
         return ResponseEntity
                 .status(HttpStatus.BAD_REQUEST)
-                .body(ErrorResponse.of(HttpStatus.BAD_REQUEST.value(), ex.getMessage()));
+                .body(ErrorResponse.of(HttpStatus.BAD_REQUEST.value(),
+                        "Violazione dei vincoli di validazione della richiesta."));
     }
 
-    // Stati di inconsistenza che richiedono intervento manuale
-    // (es. cambio sala riuscito solo a metà: nuovo evento creato, vecchio non cancellabile)
     @ExceptionHandler(IllegalStateException.class)
-    public ResponseEntity<ErrorResponse> handleIllegalState(IllegalStateException ex) {
-        log.error("Stato inconsistente: {}", ex.getMessage());
+    public ResponseEntity<ErrorResponse> handleIllegalState(IllegalStateException ex, HttpServletRequest request) {
+        String correlationId = UUID.randomUUID().toString();
+        String uri = request != null ? request.getRequestURI() : "INTERNAL";
+        log.error("[CorrID: {}] Stato inconsistente: {}", correlationId, ex.getMessage());
+        auditService.logGraphIncident("STATE_CONFLICT_OR_ROLLBACK", uri, HttpStatus.CONFLICT.value(),
+                ex.getMessage(), correlationId);
         return ResponseEntity
                 .status(HttpStatus.CONFLICT)
                 .body(ErrorResponse.of(HttpStatus.CONFLICT.value(), ex.getMessage()));
     }
 
-    // Operazioni riservate (es. solo admin) tentate da utenti senza permesso
     @ExceptionHandler(AccessDeniedException.class)
     public ResponseEntity<ErrorResponse> handleAccessDenied(AccessDeniedException ex) {
         log.warn("Accesso negato: {}", ex.getMessage());
         return ResponseEntity
                 .status(HttpStatus.FORBIDDEN)
-                .body(ErrorResponse.of(HttpStatus.FORBIDDEN.value(), "Non hai i permessi per eseguire questa operazione."));
+                .body(ErrorResponse.of(HttpStatus.FORBIDDEN.value(),
+                        "Non hai i permessi per eseguire questa operazione."));
+    }
+
+    /**
+     * Overload retrocompatibile per i test unitari diretti.
+     */
+    public ResponseEntity<ErrorResponse> handleGraphApiException(ApiException ex) {
+        return handleGraphApiException(ex, null);
     }
 
     /**
      * Gestione degli errori restituiti dalle API Microsoft Graph (tramite Kiota ApiException).
-     * In caso di rate limiting (HTTP 429), propaga l'header Retry-After indicando al client
-     * quanti secondi attendere prima di ripetere la richiesta.
+     * Classifica gli incidenti per il SIEM (NIS 2 Art. 21/25) e impedisce l'esposizione di
+     * messaggi diagnostici grezzi al client (SEC-09).
      */
     @ExceptionHandler(ApiException.class)
-    public ResponseEntity<ErrorResponse> handleGraphApiException(ApiException ex) {
+    public ResponseEntity<ErrorResponse> handleGraphApiException(ApiException ex, HttpServletRequest request) {
         int statusCode = ex.getResponseStatusCode();
+        String correlationId = UUID.randomUUID().toString();
+        String uri = request != null ? request.getRequestURI() : "/api/prenotazioni";
+
         if (statusCode == 429) {
-            String retryAfter = null;
-            if (ex.getResponseHeaders() != null && ex.getResponseHeaders().containsKey("Retry-After")) {
-                var headers = ex.getResponseHeaders().get("Retry-After");
-                if (headers != null && !headers.isEmpty()) {
-                    retryAfter = headers.iterator().next();
-                }
-            }
-            log.warn("Microsoft Graph API rate limit (429) raggiunto. Retry-After: {}s", retryAfter);
+            String retryAfter = extractRetryAfter(ex);
+            log.warn("[CorrID: {}] Microsoft Graph API rate limit (429) raggiunto. Retry-After: {}s",
+                    correlationId, retryAfter);
+            auditService.logGraphIncident("RATE_LIMIT_EXCEEDED", uri, statusCode,
+                    "Throttling Microsoft Graph - RetryAfter: " + retryAfter, correlationId);
+
             var responseBuilder = ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS);
             if (retryAfter != null) {
                 responseBuilder.header("Retry-After", retryAfter);
@@ -97,26 +121,53 @@ public class GlobalExceptionHandler {
                     : "Troppe richieste verso Microsoft Graph API. Riprova tra pochi secondi.";
             return responseBuilder.body(ErrorResponse.of(HttpStatus.TOO_MANY_REQUESTS.value(), msg));
         }
-        log.error("Errore Microsoft Graph API (status {}): {}", statusCode, ex.getMessage(), ex);
+
+        if (statusCode == 401 || statusCode == 403) {
+            log.error("[CRITICAL INCIDENT - CorrID: {}] Errore autorizzativo con Microsoft Graph (status {}). Verificare client secret e permessi tenant.",
+                    correlationId, statusCode);
+            auditService.logGraphIncident("GRAPH_AUTH_FAILURE", uri, statusCode,
+                    "Fallimento credenziali daemon Graph", correlationId);
+
+            return ResponseEntity
+                    .status(HttpStatus.BAD_GATEWAY)
+                    .body(ErrorResponse.of(HttpStatus.BAD_GATEWAY.value(),
+                            "Errore di comunicazione e autenticazione verso il servizio cloud (Rif: " + correlationId + ")."));
+        }
+
+        log.error("[CorrID: {}] Errore Microsoft Graph API (status {}): {}", correlationId, statusCode, ex.getMessage(), ex);
+        auditService.logGraphIncident("GRAPH_REMOTE_ERROR", uri, statusCode,
+                "Errore remoto Graph HTTP " + statusCode, correlationId);
+
+        // Sanificazione: nessun ex.getMessage() grezzo propagato al client
         return ResponseEntity
                 .status(HttpStatus.BAD_GATEWAY)
-                .body(ErrorResponse.of(HttpStatus.BAD_GATEWAY.value(), "Errore di comunicazione con Microsoft Graph: " + ex.getMessage()));
+                .body(ErrorResponse.of(HttpStatus.BAD_GATEWAY.value(),
+                        "Errore di comunicazione con il servizio di calendario esterno Microsoft 365 (Rif: " + correlationId + ")."));
     }
 
     /**
-     * Gestione delle eccezioni derivanti da esecuzioni asincrone (es. chiamate parallele a Graph).
-     * Estrae la causa originaria e delega al gestore specifico (ApiException, TimeoutException o generico).
+     * Overload retrocompatibile per i test unitari diretti.
      */
-    @ExceptionHandler(CompletionException.class)
     public ResponseEntity<ErrorResponse> handleCompletionException(CompletionException ex) {
+        return handleCompletionException(ex, null);
+    }
+
+    @ExceptionHandler(CompletionException.class)
+    public ResponseEntity<ErrorResponse> handleCompletionException(CompletionException ex, HttpServletRequest request) {
         Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
         if (cause instanceof ApiException apiException) {
-            return handleGraphApiException(apiException);
+            return handleGraphApiException(apiException, request);
         }
         if (cause instanceof TimeoutException) {
-            log.error("Timeout durante l'interrogazione concorrente di Microsoft Graph: {}", cause.getMessage());
+            String correlationId = UUID.randomUUID().toString();
+            String uri = request != null ? request.getRequestURI() : "/api/prenotazioni/tutte";
+            log.error("[CorrID: {}] Timeout durante l'interrogazione concorrente di Microsoft Graph: {}",
+                    correlationId, cause.getMessage());
+            auditService.logGraphIncident("GRAPH_TIMEOUT", uri, HttpStatus.GATEWAY_TIMEOUT.value(),
+                    "Timeout interrogazione concorrente Graph", correlationId);
             return ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT)
-                    .body(ErrorResponse.of(HttpStatus.GATEWAY_TIMEOUT.value(), "La richiesta a Microsoft Graph è scaduta. Riprova più tardi."));
+                    .body(ErrorResponse.of(HttpStatus.GATEWAY_TIMEOUT.value(),
+                            "La richiesta a Microsoft Graph è scaduta. Riprova più tardi."));
         }
         if (cause instanceof Exception exception) {
             return handleGeneric(exception);
@@ -124,12 +175,22 @@ public class GlobalExceptionHandler {
         return handleGeneric(new Exception(cause));
     }
 
-    // Tutto il resto: errori imprevisti, non esponiamo dettagli interni al client
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleGeneric(Exception ex) {
         log.error("Errore interno non gestito", ex);
         return ResponseEntity
                 .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(ErrorResponse.of(HttpStatus.INTERNAL_SERVER_ERROR.value(), "Si è verificato un errore interno. Riprova più tardi."));
+                .body(ErrorResponse.of(HttpStatus.INTERNAL_SERVER_ERROR.value(),
+                        "Si è verificato un errore interno. Riprova più tardi."));
+    }
+
+    private String extractRetryAfter(ApiException ex) {
+        if (ex.getResponseHeaders() != null && ex.getResponseHeaders().containsKey("Retry-After")) {
+            var headers = ex.getResponseHeaders().get("Retry-After");
+            if (headers != null && !headers.isEmpty()) {
+                return headers.iterator().next();
+            }
+        }
+        return null;
     }
 }
