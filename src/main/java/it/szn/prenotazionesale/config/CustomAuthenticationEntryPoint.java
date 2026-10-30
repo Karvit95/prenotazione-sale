@@ -24,10 +24,13 @@ public class CustomAuthenticationEntryPoint implements AuthenticationEntryPoint 
     @Override
     public void commence(HttpServletRequest request, HttpServletResponse response,
                          AuthenticationException authException) throws IOException {
+        String safeReason = auditService.sanitizeSensitiveText(
+                authException != null ? authException.getMessage() : "Unauthorized"
+        );
         auditService.logAuthenticationFailure(
                 request.getRequestURI(),
                 request,
-                authException.getMessage()
+                safeReason
         );
 
         response.setStatus(HttpStatus.UNAUTHORIZED.value());

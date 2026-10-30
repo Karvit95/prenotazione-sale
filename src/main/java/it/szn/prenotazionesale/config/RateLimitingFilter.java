@@ -8,20 +8,24 @@ import jakarta.servlet.ServletResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Filtro di Rate Limiting perimetrale su finestra temporale di 60 secondi per client IP:
  * - Max 120 richieste/minuto per operazioni di lettura (GET)
- * - Max 30 richieste/minuto per operazioni di scrittura (POST, PATCH, DELETE)
- * Include protezione anti-OOM con pulizia automatica delle voci scadute.
+ * - Max 30 richieste/minuto per operazioni di scrittura (POST, PATCH, DELETE, PUT)
+ * Include protezione anti-OOM con pulizia automatica delle voci scadute,
+ * validazione anti-spoofing su X-Forwarded-For e propagazione header CORS su risposte 429.
  */
 @Slf4j
 @Component
@@ -33,7 +37,17 @@ public class RateLimitingFilter implements Filter {
     private static final long WINDOW_MS = 60_000L;
     private static final int MAX_TRACKED_CLIENTS = 10_000;
 
+    private final AppConfig appConfig;
     private final ConcurrentHashMap<String, RequestCounter> requestCounts = new ConcurrentHashMap<>();
+
+    @Autowired
+    public RateLimitingFilter(AppConfig appConfig) {
+        this.appConfig = appConfig;
+    }
+
+    public RateLimitingFilter() {
+        this.appConfig = null;
+    }
 
     private static class RequestCounter {
         private final long windowStart;
@@ -86,6 +100,7 @@ public class RateLimitingFilter implements Filter {
         if (currentCount > maxAllowed) {
             log.warn("Rate limit superato per client {} ({} {} - {}/{} req/min)",
                     clientIp, method, httpRequest.getRequestURI(), currentCount, maxAllowed);
+            applyCorsHeadersIfAuthorized(httpRequest, httpResponse);
             httpResponse.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
             httpResponse.setContentType("application/json");
             httpResponse.setHeader("Retry-After", "60");
@@ -98,12 +113,48 @@ public class RateLimitingFilter implements Filter {
         chain.doFilter(request, response);
     }
 
-    private String extractClientIp(HttpServletRequest request) {
-        String xForwardedFor = request.getHeader("X-Forwarded-For");
-        if (xForwardedFor != null && !xForwardedFor.isBlank()) {
-            return xForwardedFor.split(",")[0].trim();
+    private void applyCorsHeadersIfAuthorized(HttpServletRequest request, HttpServletResponse response) {
+        String origin = request.getHeader("Origin");
+        if (origin == null || origin.isBlank()) {
+            return;
         }
-        return request.getRemoteAddr();
+        List<String> allowedOrigins = List.of("http://localhost:5173");
+        if (appConfig != null && appConfig.getCors() != null
+                && appConfig.getCors().getAllowedOrigins() != null
+                && !appConfig.getCors().getAllowedOrigins().isBlank()) {
+            allowedOrigins = Arrays.stream(appConfig.getCors().getAllowedOrigins().split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .toList();
+        }
+        if (allowedOrigins.contains(origin)) {
+            response.setHeader("Access-Control-Allow-Origin", origin);
+            response.setHeader("Access-Control-Expose-Headers", "Retry-After, Location");
+            response.setHeader("Vary", "Origin");
+        }
+    }
+
+    private String extractClientIp(HttpServletRequest request) {
+        String remoteAddr = request.getRemoteAddr();
+        if (isTrustedProxy(remoteAddr)) {
+            String xForwardedFor = request.getHeader("X-Forwarded-For");
+            if (xForwardedFor != null && !xForwardedFor.isBlank()) {
+                return xForwardedFor.split(",")[0].trim();
+            }
+        }
+        return remoteAddr;
+    }
+
+    private boolean isTrustedProxy(String ip) {
+        if (ip == null || ip.isBlank()) {
+            return false;
+        }
+        return "127.0.0.1".equals(ip)
+                || "::1".equals(ip)
+                || "0:0:0:0:0:0:0:1".equals(ip)
+                || ip.startsWith("10.")
+                || ip.startsWith("192.168.")
+                || ip.matches("^172\\.(1[6-9]|2[0-9]|3[0-1])\\..*");
     }
 }
 

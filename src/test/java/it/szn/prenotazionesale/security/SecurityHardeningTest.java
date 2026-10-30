@@ -57,7 +57,8 @@ class SecurityHardeningTest {
     @Test
     void testSec01_BolaProtection_RejectsUnauthorizedMailbox() {
         Jwt jwt = buildMockAdminJwt();
-        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () ->
+        org.springframework.security.access.AccessDeniedException ex = assertThrows(
+                org.springframework.security.access.AccessDeniedException.class, () ->
                 prenotazioniService.getPrenotazioni(
                         "direttore.generale@szn.it",
                         "2026-11-01T08:00:00",

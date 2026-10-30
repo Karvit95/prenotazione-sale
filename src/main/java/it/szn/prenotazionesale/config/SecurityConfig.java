@@ -43,6 +43,10 @@ public class SecurityConfig {
 
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        String adminRole = (appConfig.getAdminRole() != null && !appConfig.getAdminRole().isBlank())
+                ? appConfig.getAdminRole()
+                : "RoomBooking.Admin";
+
         http
             // 1. CORS restrittivo e sicuro
             .cors(cors -> cors.configurationSource(corsConfigurationSource()))
@@ -53,10 +57,18 @@ public class SecurityConfig {
             // 3. Imposizione rigida dell'assenza di stato: nessuna HttpSession memorizzata
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 
-            // 4. Header di sicurezza HTTP (Anti-Clickjacking, NoSniff, CSP, Referrer-Policy)
+            // 4. Header di sicurezza HTTP (Anti-Clickjacking, NoSniff, HSTS, Permissions-Policy, CSP, Referrer-Policy)
             .headers(headers -> headers
                 .frameOptions(frame -> frame.deny())
                 .contentTypeOptions(Customizer.withDefaults())
+                .httpStrictTransportSecurity(hsts -> hsts
+                    .includeSubDomains(true)
+                    .preload(true)
+                    .maxAgeInSeconds(31536000)
+                )
+                .permissionsPolicyHeader(permissions -> permissions
+                    .policy("camera=(), microphone=(), geolocation=()")
+                )
                 .referrerPolicy(referrer -> referrer
                     .policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN)
                 )
@@ -68,9 +80,10 @@ public class SecurityConfig {
             // 5. Regole di autorizzazione perimetrali su ruoli ed endpoint
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-                .requestMatchers(HttpMethod.POST, "/api/prenotazioni/**").hasRole("RoomBooking.Admin")
-                .requestMatchers(HttpMethod.PATCH, "/api/prenotazioni/**").hasRole("RoomBooking.Admin")
-                .requestMatchers(HttpMethod.DELETE, "/api/prenotazioni/**").hasRole("RoomBooking.Admin")
+                .requestMatchers(HttpMethod.POST, "/api/prenotazioni/**").hasRole(adminRole)
+                .requestMatchers(HttpMethod.PUT, "/api/prenotazioni/**").hasRole(adminRole)
+                .requestMatchers(HttpMethod.PATCH, "/api/prenotazioni/**").hasRole(adminRole)
+                .requestMatchers(HttpMethod.DELETE, "/api/prenotazioni/**").hasRole(adminRole)
                 .requestMatchers("/api/sale/**").authenticated()
                 .requestMatchers(HttpMethod.GET, "/api/prenotazioni/**").authenticated()
                 .anyRequest().authenticated()

@@ -17,6 +17,9 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -88,6 +91,12 @@ public class PrenotazioniService {
             "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?(Z|[+-]\\d{2}:\\d{2})?$");
 
     private static final Pattern PATTERN_ICALUID_SICURO = Pattern.compile("^[A-Za-z0-9._~@+=/-]{1,255}$");
+    private static final Pattern PATTERN_EMAIL_SICURA = Pattern.compile("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
+    private static final Pattern PATTERN_XSS_PERICOLOSO = Pattern.compile(
+            "(?is)<\\s*(script|iframe|object|embed|svg|style)\\b|javascript\\s*:|on[a-z]{2,20}\\s*=");
+    private static final LocalTime ORA_APERTURA = LocalTime.of(8, 0);
+    private static final LocalTime ORA_CHIUSURA = LocalTime.of(20, 0);
+    private static final ZoneId ZONA_ROMA = ZoneId.of("Europe/Rome");
     private static final long MAX_RANGE_GIORNI = 370L;
     private static final long MAX_DURATA_RICORRENZA_GIORNI = 365L;
     private static final int MAX_INTERVALLO = 52;
@@ -152,6 +161,11 @@ public class PrenotazioniService {
             throw new IllegalArgumentException("L'indirizzo email della sala non puo essere vuoto.");
         }
         String chiave = salaEmail.trim().toLowerCase();
+        if (!PATTERN_EMAIL_SICURA.matcher(chiave).matches()) {
+            log.warn("Formato salaEmail non valido o tentativo di injection: {}", salaEmail);
+            throw new IllegalArgumentException(
+                    "Formato indirizzo non valido: la sala specificata non e autorizzata o inesistente.");
+        }
         if (lockPerSala.containsKey(chiave)) {
             return;
         }
@@ -159,8 +173,29 @@ public class PrenotazioniService {
                 .anyMatch(s -> s.getEmail() != null && s.getEmail().trim().equalsIgnoreCase(chiave));
         if (!autorizzata) {
             log.warn("Tentativo di accesso BOLA a casella non autorizzata: {}", salaEmail);
-            throw new IllegalArgumentException(
+            throw new AccessDeniedException(
                     "Errore di autorizzazione: la sala specificata non e autorizzata o inesistente.");
+        }
+    }
+
+    private void validaContenutoTestuale(PrenotazioneRequestDTO request) {
+        if (request == null) {
+            throw new IllegalArgumentException("La richiesta di prenotazione non puo essere nulla.");
+        }
+        if (request.getTitolo() == null || request.getTitolo().isBlank()) {
+            throw new IllegalArgumentException("Il titolo della prenotazione e obbligatorio.");
+        }
+        if (PATTERN_XSS_PERICOLOSO.matcher(request.getTitolo()).find()) {
+            log.warn("Rilevato payload XSS/HTML pericoloso nel titolo della prenotazione");
+            throw new IllegalArgumentException("Il titolo contiene tag HTML o codice script non consentito.");
+        }
+        if (request.getDescrizione() != null && PATTERN_XSS_PERICOLOSO.matcher(request.getDescrizione()).find()) {
+            log.warn("Rilevato payload XSS/HTML pericoloso nella descrizione della prenotazione");
+            throw new IllegalArgumentException("La descrizione contiene tag HTML o codice script non consentito.");
+        }
+        String titoloPulito = stripHtml(request.getTitolo());
+        if (titoloPulito == null || titoloPulito.isBlank()) {
+            throw new IllegalArgumentException("Il titolo della prenotazione non puo contenere solo tag HTML.");
         }
     }
 
@@ -253,6 +288,8 @@ public class PrenotazioniService {
         log.info("Creazione prenotazione per sala {} - intervallo: {} -> {}", request.getSalaEmail(),
                 request.getStart(), request.getEnd());
         verificaAdmin(jwt);
+        validaSalaAutorizzata(request.getSalaEmail());
+        validaContenutoTestuale(request);
         validaOrariPrenotazione(request.getStart(), request.getEnd());
 
         if (request.getPattern() != null) {
@@ -313,6 +350,11 @@ public class PrenotazioniService {
     public PrenotazioneDTO modificaPrenotazione(String eventId, PrenotazioneRequestDTO request, Jwt jwt) {
         log.info("Modifica prenotazione ID {} per sala {}", eventId, request.getSalaEmail());
         verificaAdmin(jwt);
+        validaSalaAutorizzata(request.getSalaEmail());
+        if (request.getSalaEmailOriginale() != null && !request.getSalaEmailOriginale().isBlank()) {
+            validaSalaAutorizzata(request.getSalaEmailOriginale());
+        }
+        validaContenutoTestuale(request);
         validaOrariPrenotazione(request.getStart(), request.getEnd());
 
         String salaOriginale = request.getSalaEmailOriginale();
@@ -385,11 +427,12 @@ public class PrenotazioniService {
 
                     // Ricostruzione esplicita della serie ricorrente nella sala di destinazione
                     var nuovoEvento = new Event();
-                    nuovoEvento.setSubject(request.getTitolo());
+                    nuovoEvento.setSubject(stripHtml(request.getTitolo()));
 
                     if (request.getDescrizione() != null) {
                         var body = new ItemBody();
-                        body.setContent(request.getDescrizione());
+                        String descSanificata = stripHtml(request.getDescrizione());
+                        body.setContent(descSanificata != null ? descSanificata : "");
                         body.setContentType(BodyType.Text);
                         nuovoEvento.setBody(body);
                     }
@@ -512,11 +555,12 @@ public class PrenotazioniService {
                         : eventId;
 
                 var event = new Event();
-                event.setSubject(request.getTitolo());
+                event.setSubject(stripHtml(request.getTitolo()));
 
                 if (request.getDescrizione() != null) {
                     var body = new ItemBody();
-                    body.setContent(request.getDescrizione());
+                    String descSanificata = stripHtml(request.getDescrizione());
+                    body.setContent(descSanificata != null ? descSanificata : "");
                     body.setContentType(BodyType.Text);
                     event.setBody(body);
                 }
@@ -588,11 +632,12 @@ public class PrenotazioniService {
                 // Aggiornamento della singola occorrenza: aggiorna solo i dettagli di questa
                 // specifica istanza
                 var event = new Event();
-                event.setSubject(request.getTitolo());
+                event.setSubject(stripHtml(request.getTitolo()));
 
                 if (request.getDescrizione() != null) {
                     var body = new ItemBody();
-                    body.setContent(request.getDescrizione());
+                    String descSanificata = stripHtml(request.getDescrizione());
+                    body.setContent(descSanificata != null ? descSanificata : "");
                     body.setContentType(BodyType.Text);
                     event.setBody(body);
                 }
@@ -782,22 +827,27 @@ public class PrenotazioniService {
         log.debug("Costruzione evento per sala {}: start={}, end={}", request.getSalaEmail(), request.getStart(),
                 request.getEnd());
         var event = new Event();
-        event.setSubject(request.getTitolo());
+        event.setSubject(stripHtml(request.getTitolo()));
 
         if (request.getDescrizione() != null) {
             var body = new ItemBody();
-            body.setContent(request.getDescrizione());
+            String descSanificata = stripHtml(request.getDescrizione());
+            body.setContent(descSanificata != null ? descSanificata : "");
             body.setContentType(BodyType.Text);
             event.setBody(body);
         }
 
+        DateTimeFormatter fmtIso = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+        LocalDateTime parsedStart = parseIsoToRomeLocalDateTime(request.getStart());
+        LocalDateTime parsedEnd = parseIsoToRomeLocalDateTime(request.getEnd());
+
         var start = new DateTimeTimeZone();
-        start.setDateTime(request.getStart());
+        start.setDateTime(parsedStart.format(fmtIso));
         start.setTimeZone("Europe/Rome");
         event.setStart(start);
 
         var end = new DateTimeTimeZone();
-        end.setDateTime(request.getEnd());
+        end.setDateTime(parsedEnd.format(fmtIso));
         end.setTimeZone("Europe/Rome");
         event.setEnd(end);
 
@@ -976,19 +1026,56 @@ public class PrenotazioniService {
         }
     }
 
+    private LocalDateTime parseIsoToRomeLocalDateTime(String dateTimeStr) {
+        if (dateTimeStr == null || dateTimeStr.isBlank()) {
+            throw new IllegalArgumentException("Errore: Formato data/ora non valido. Usa il formato ISO-8601.");
+        }
+        try {
+            return LocalDateTime.parse(dateTimeStr);
+        } catch (DateTimeParseException e1) {
+            try {
+                return OffsetDateTime.parse(dateTimeStr).atZoneSameInstant(ZONA_ROMA).toLocalDateTime();
+            } catch (DateTimeParseException e2) {
+                if (dateTimeStr.length() > 19) {
+                    return LocalDateTime.parse(dateTimeStr.substring(0, 19));
+                }
+                throw e1;
+            }
+        }
+    }
+
     /**
-     * Valida che gli orari di inizio e fine rispettino il formato ISO-8601 e che
-     * l'inizio sia antecedente alla fine.
+     * Valida che gli orari di inizio e fine rispettino il formato ISO-8601,
+     * l'ordine cronologico, la fascia oraria aziendale (08:00 - 20:00) e non cadano nel passato.
      */
     private void validaOrariPrenotazione(String startStr, String endStr) {
         try {
-            LocalDateTime start = LocalDateTime.parse(startStr);
-            LocalDateTime end = LocalDateTime.parse(endStr);
+            LocalDateTime start = parseIsoToRomeLocalDateTime(startStr);
+            LocalDateTime end = parseIsoToRomeLocalDateTime(endStr);
 
             if (end.isBefore(start) || end.isEqual(start)) {
                 log.warn("Validazione fallita: end={} prima o uguale a start={}", end, start);
                 throw new IllegalArgumentException(
                         "Errore: l'orario di fine deve essere successivo all'orario di inizio.");
+            }
+
+            if (!start.toLocalDate().isEqual(end.toLocalDate())) {
+                log.warn("Validazione fallita: prenotazione multi-giorno start={}, end={}", start, end);
+                throw new IllegalArgumentException(
+                        "Errore: l'evento deve iniziare e terminare nella stessa giornata lavorativa (08:00 - 20:00).");
+            }
+
+            if (start.toLocalTime().isBefore(ORA_APERTURA) || start.toLocalTime().isAfter(ORA_CHIUSURA)
+                    || end.toLocalTime().isBefore(ORA_APERTURA) || end.toLocalTime().isAfter(ORA_CHIUSURA)) {
+                log.warn("Validazione fallita: slot fuori fascia aziendale 08:00-20:00: {} -> {}", start, end);
+                throw new IllegalArgumentException(
+                        "Errore: le prenotazioni sono consentite esclusivamente nella fascia oraria 08:00 - 20:00.");
+            }
+
+            if (start.isBefore(LocalDateTime.now(ZONA_ROMA).minusMinutes(5))) {
+                log.warn("Validazione fallita: tentativo di prenotazione nel passato: {}", start);
+                throw new IllegalArgumentException(
+                        "Errore: non e possibile effettuare prenotazioni per date o orari gia trascorsi.");
             }
 
         } catch (DateTimeParseException e) {
@@ -1019,8 +1106,8 @@ public class PrenotazioniService {
         if (occorrenze.isEmpty())
             return;
 
-        LocalDateTime startReq = LocalDateTime.parse(request.getStart().substring(0, 19));
-        LocalDateTime endReq = LocalDateTime.parse(request.getEnd().substring(0, 19));
+        LocalDateTime startReq = parseIsoToRomeLocalDateTime(request.getStart());
+        LocalDateTime endReq = parseIsoToRomeLocalDateTime(request.getEnd());
         LocalDateTime primoInizio = occorrenze.stream().map(o -> o[0]).min(Comparator.naturalOrder()).orElse(startReq);
         LocalDateTime ultimaFine = occorrenze.stream().map(o -> o[1]).max(Comparator.naturalOrder()).orElse(endReq);
 
@@ -1104,19 +1191,8 @@ public class PrenotazioniService {
      * che la sala esista e appartenga all'elenco delle sale gestite da Exchange.
      */
     private ReentrantLock getLockPerSala(String salaEmail) {
-        if (salaEmail == null || salaEmail.isBlank()) {
-            throw new IllegalArgumentException("L'email della sala non puo essere vuota.");
-        }
+        validaSalaAutorizzata(salaEmail);
         String chiave = salaEmail.trim().toLowerCase();
-        ReentrantLock existing = lockPerSala.get(chiave);
-        if (existing != null) {
-            return existing;
-        }
-        boolean esiste = saleService.getSale().stream()
-                .anyMatch(s -> s.getEmail() != null && s.getEmail().equalsIgnoreCase(chiave));
-        if (!esiste) {
-            throw new IllegalArgumentException("La sala specificata non esiste: " + salaEmail);
-        }
         return lockPerSala.computeIfAbsent(chiave, k -> new ReentrantLock());
     }
 
@@ -1128,7 +1204,9 @@ public class PrenotazioniService {
         if (html == null || html.isBlank()) {
             return null;
         }
-        String testo = html.replaceAll("(?i)<br\\s*/?>", "\n")
+        String testo = html
+                .replaceAll("(?is)<(script|style)\\b[^>]*>.*?</\\1>", "")
+                .replaceAll("(?i)<br\\s*/?>", "\n")
                 .replaceAll("(?i)</p>", "\n\n")
                 .replaceAll("(?i)</div>", "\n");
 
@@ -1164,8 +1242,8 @@ public class PrenotazioniService {
      */
     private List<LocalDateTime[]> generaOccorrenze(PrenotazioneRequestDTO request) {
         List<LocalDateTime[]> occorrenze = new ArrayList<>();
-        LocalDateTime start = LocalDateTime.parse(request.getStart());
-        LocalDateTime end = LocalDateTime.parse(request.getEnd());
+        LocalDateTime start = parseIsoToRomeLocalDateTime(request.getStart());
+        LocalDateTime end = parseIsoToRomeLocalDateTime(request.getEnd());
 
         // Evento singolo o aggiornamento su singola occorrenza: restituisce unicamente
         // la data dell'evento
