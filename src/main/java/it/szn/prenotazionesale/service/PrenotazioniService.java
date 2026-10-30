@@ -102,6 +102,28 @@ public class PrenotazioniService {
     }
 
     /**
+     * Controllo BOLA / IDOR: assicura che l'indirizzo email appartenga esclusivamente
+     * a una casella di sala censita in Exchange, bloccando tentativi di Confused Deputy
+     * verso calendari personali di utenti o dirigenti del tenant.
+     */
+    private void validaSalaAutorizzata(String salaEmail) {
+        if (salaEmail == null || salaEmail.isBlank()) {
+            throw new IllegalArgumentException("L'indirizzo email della sala non puo essere vuoto.");
+        }
+        String chiave = salaEmail.trim().toLowerCase();
+        if (lockPerSala.containsKey(chiave)) {
+            return;
+        }
+        boolean autorizzata = saleService.getSale().stream()
+                .anyMatch(s -> s.getEmail() != null && s.getEmail().trim().equalsIgnoreCase(chiave));
+        if (!autorizzata) {
+            log.warn("Tentativo di accesso BOLA a casella non autorizzata: {}", salaEmail);
+            throw new IllegalArgumentException(
+                    "Errore di autorizzazione: la sala specificata non e autorizzata o inesistente.");
+        }
+    }
+
+    /**
      * Recupera le prenotazioni confermate per una specifica sala nell'intervallo
      * temporale richiesto.
      * Utilizza l'endpoint calendarView di Microsoft Graph per espandere
@@ -121,18 +143,20 @@ public class PrenotazioniService {
     public List<PrenotazioneDTO> getPrenotazioni(String salaEmail, String dataInizio, String dataFine, Jwt jwt) {
         log.info("Richiesta prenotazioni per sala {} dal {} al {}", salaEmail, dataInizio, dataFine);
 
+        validaSalaAutorizzata(salaEmail);
         validaParametroFiltroData(dataInizio, "dataInizio");
         validaParametroFiltroData(dataFine, "dataFine");
 
-        var events = graphClient.users().byUserId(salaEmail).calendarView().get(req -> {
+        String salaNormalizzata = salaEmail.trim().toLowerCase();
+        var events = graphClient.users().byUserId(salaNormalizzata).calendarView().get(req -> {
             req.queryParameters.startDateTime = dataInizio;
             req.queryParameters.endDateTime = dataFine;
             req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
         }).getValue();
 
-        log.debug("Trovati {} eventi per la sala {}", events.size(), salaEmail);
+        log.debug("Trovati {} eventi per la sala {}", events.size(), salaNormalizzata);
 
-        return events.stream().map(event -> mapToDTO(event, salaEmail, jwt)).collect(Collectors.toList());
+        return events.stream().map(event -> mapToDTO(event, salaNormalizzata, jwt)).collect(Collectors.toList());
     }
 
     /**
