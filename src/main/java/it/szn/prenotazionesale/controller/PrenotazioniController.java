@@ -1,8 +1,10 @@
 package it.szn.prenotazionesale.controller;
 
+import it.szn.prenotazionesale.audit.SecurityAuditService;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
 import it.szn.prenotazionesale.service.PrenotazioniService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 
@@ -13,6 +15,7 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @RestController
@@ -20,9 +23,15 @@ import java.util.List;
 public class PrenotazioniController {
 
     private final PrenotazioniService prenotazioniService;
+    private final SecurityAuditService auditService;
+    private final HttpServletRequest httpServletRequest;
 
-    public PrenotazioniController(PrenotazioniService prenotazioniService) {
+    public PrenotazioniController(PrenotazioniService prenotazioniService,
+                                  SecurityAuditService auditService,
+                                  HttpServletRequest httpServletRequest) {
         this.prenotazioniService = prenotazioniService;
+        this.auditService = auditService;
+        this.httpServletRequest = httpServletRequest;
     }
 
     // GET /api/prenotazioni?salaEmail=...&dataInizio=...&dataFine=...
@@ -37,7 +46,7 @@ public class PrenotazioniController {
         log.debug("GET /api/prenotazioni - restituite {} prenotazioni", result.size());
         return ResponseEntity.ok(result);
     }
-    
+
     // GET /api/prenotazioni/tutte?dataInizio=...&dataFine=...
     @GetMapping("/tutte")
     public ResponseEntity<List<PrenotazioneDTO>> getPrenotazioniTutteSale(
@@ -56,9 +65,18 @@ public class PrenotazioniController {
     public ResponseEntity<PrenotazioneDTO> creaPrenotazione(
             @Valid @RequestBody PrenotazioneRequestDTO request,
             @AuthenticationPrincipal Jwt jwt) {
-        log.info("POST /api/prenotazioni - sala: {}, titolo: {}", request.getSalaEmail(), request.getTitolo());
+        log.info("POST /api/prenotazioni - sala: {}, intervallo: {} -> {}",
+                request.getSalaEmail(), request.getStart(), request.getEnd());
         var result = prenotazioniService.creaPrenotazione(request, jwt);
         log.info("POST /api/prenotazioni - creata con ID {}", result.getId());
+
+        auditService.logSuccess("CREATE_BOOKING", request.getSalaEmail(), jwt, httpServletRequest, Map.of(
+                "bookingId", result.getId() != null ? result.getId() : "",
+                "start", request.getStart() != null ? request.getStart() : "",
+                "end", request.getEnd() != null ? request.getEnd() : "",
+                "ricorrente", request.getPattern() != null
+        ));
+
         return ResponseEntity.ok(result);
     }
 
@@ -72,6 +90,12 @@ public class PrenotazioniController {
         log.info("PATCH /api/prenotazioni/{} - sala: {}", eventId, request.getSalaEmail());
         var result = prenotazioniService.modificaPrenotazione(eventId, request, jwt);
         log.info("PATCH /api/prenotazioni/{} - modificata con successo", eventId);
+
+        auditService.logSuccess("UPDATE_BOOKING", eventId, jwt, httpServletRequest, Map.of(
+                "salaEmail", request.getSalaEmail() != null ? request.getSalaEmail() : "",
+                "tipoModifica", request.getTipoModifica() != null ? request.getTipoModifica() : "SINGOLA"
+        ));
+
         return ResponseEntity.ok(result);
     }
 
@@ -84,9 +108,17 @@ public class PrenotazioniController {
             @RequestParam(defaultValue = "SERIE") String tipoCancellazione,
             @RequestParam(required = false) String seriesMasterId,
             @AuthenticationPrincipal Jwt jwt) {
-        log.info("DELETE /api/prenotazioni/{} - sala: {}, tipo: {}, seriesMasterId: {}", eventId, salaEmail, tipoCancellazione, seriesMasterId);
+        log.info("DELETE /api/prenotazioni/{} - sala: {}, tipo: {}, seriesMasterId: {}",
+                eventId, salaEmail, tipoCancellazione, seriesMasterId);
         prenotazioniService.cancellaPrenotazione(eventId, salaEmail, tipoCancellazione, seriesMasterId, jwt);
         log.info("DELETE /api/prenotazioni/{} - cancellata con successo", eventId);
+
+        auditService.logSuccess("DELETE_BOOKING", eventId, jwt, httpServletRequest, Map.of(
+                "salaEmail", salaEmail,
+                "tipoCancellazione", tipoCancellazione,
+                "seriesMasterId", seriesMasterId != null ? seriesMasterId : ""
+        ));
+
         return ResponseEntity.noContent().build();
     }
 }
