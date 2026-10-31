@@ -3,6 +3,8 @@ package it.szn.prenotazionesale.controller;
 import it.szn.prenotazionesale.audit.SecurityAuditService;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
+import it.szn.prenotazionesale.model.PrenotazioniTutteSaleResponse;
+import it.szn.prenotazionesale.model.SalaNonDisponibileDTO;
 import it.szn.prenotazionesale.service.PrenotazioniService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -16,6 +18,8 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Slf4j
 @RestController
@@ -49,14 +53,26 @@ public class PrenotazioniController {
 
     // GET /api/prenotazioni/tutte?dataInizio=...&dataFine=...
     @GetMapping("/tutte")
-    public ResponseEntity<List<PrenotazioneDTO>> getPrenotazioniTutteSale(
+    public ResponseEntity<PrenotazioniTutteSaleResponse> getPrenotazioniTutteSale(
             @RequestParam String dataInizio,
             @RequestParam String dataFine,
             @AuthenticationPrincipal Jwt jwt) {
         log.info("GET /api/prenotazioni/tutte - dal: {}, al: {}", dataInizio, dataFine);
-        List<PrenotazioneDTO> prenotazioni = prenotazioniService.getPrenotazioniTutteSale(dataInizio, dataFine, jwt);
-        log.debug("GET /api/prenotazioni/tutte - restituite {} prenotazioni", prenotazioni.size());
-        return ResponseEntity.ok(prenotazioni);
+        PrenotazioniTutteSaleResponse response = prenotazioniService.getPrenotazioniTutteSale(dataInizio, dataFine, jwt);
+        if (response.isParziale()) {
+            int n = response.getSaleNonDisponibili().size();
+            int tot = response.getTotaleSale() > 0 ? response.getTotaleSale() : n;
+            String emailElencate = response.getSaleNonDisponibili().stream()
+                    .map(SalaNonDisponibileDTO::getSalaEmail)
+                    .collect(Collectors.joining(", "));
+            String correlationId = UUID.randomUUID().toString();
+            String msg = String.format("%d sale su %d non disponibili: %s", n, tot, emailElencate);
+            log.warn("GET /api/prenotazioni/tutte - Risultato parziale: {}", msg);
+            auditService.logGraphIncident("GRAPH_PARTIAL_RESULT", "/api/prenotazioni/tutte", 200, msg, correlationId);
+        }
+        log.debug("GET /api/prenotazioni/tutte - restituite {} prenotazioni (parziale: {})",
+                response.getPrenotazioni().size(), response.isParziale());
+        return ResponseEntity.ok(response);
     }
 
     // POST /api/prenotazioni

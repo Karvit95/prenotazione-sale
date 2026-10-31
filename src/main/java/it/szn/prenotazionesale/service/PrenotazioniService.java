@@ -10,8 +10,11 @@ import com.microsoft.graph.models.PatternedRecurrence;
 import com.microsoft.graph.models.RecurrencePattern;
 import com.microsoft.graph.models.RecurrenceRange;
 import com.microsoft.kiota.ApiException;
+import it.szn.prenotazionesale.exception.GraphPaginationException;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
+import it.szn.prenotazionesale.model.PrenotazioniTutteSaleResponse;
+import it.szn.prenotazionesale.model.SalaNonDisponibileDTO;
 import it.szn.prenotazionesale.config.AppConfig;
 import it.szn.prenotazionesale.model.SalaDTO;
 import lombok.extern.slf4j.Slf4j;
@@ -24,11 +27,16 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -145,41 +153,106 @@ public class PrenotazioniService {
 
     /**
      * Recupera in parallelo le prenotazioni di tutte le sale gestite
-     * nell'intervallo specificato.
-     * Esegue chiamate asincrone concorrenti su pool dedicato per ottimizzare i
-     * tempi di risposta,
-     * aggregando infine tutti gli eventi in una singola lista unificata.
+     * nell'intervallo specificato con supporto ai risultati parziali.
+     * Esegue chiamate asincrone concorrenti su pool dedicato con timeout di 12 secondi per sala.
+     * Se almeno una sala ha successo, restituisce le prenotazioni disponibili e la lista delle
+     * sale fallite (con motivo generico). Se tutte le sale falliscono, rilancia l'errore originale.
      *
      * @param dataInizio estremo inferiore dell'intervallo temporale
      * @param dataFine   estremo superiore dell'intervallo temporale
      * @param jwt        token JWT del chiamante
-     * @return lista complessiva delle prenotazioni di tutte le sale
+     * @return risposta aggregata con prenotazioni, sale non disponibili ed eventuale flag parziale
      */
-    public List<PrenotazioneDTO> getPrenotazioniTutteSale(String dataInizio, String dataFine, Jwt jwt) {
+    public PrenotazioniTutteSaleResponse getPrenotazioniTutteSale(String dataInizio, String dataFine, Jwt jwt) {
         log.info("Richiesta prenotazioni per tutte le sale dal {} al {}", dataInizio, dataFine);
+        validator.validaIntervalloDate(dataInizio, dataFine);
+
         List<SalaDTO> tutteLeSale = saleService.getSale();
+        if (tutteLeSale == null || tutteLeSale.isEmpty()) {
+            return PrenotazioniTutteSaleResponse.builder()
+                    .prenotazioni(Collections.emptyList())
+                    .saleNonDisponibili(Collections.emptyList())
+                    .parziale(false)
+                    .totaleSale(0)
+                    .build();
+        }
 
-        List<CompletableFuture<List<PrenotazioneDTO>>> futures = tutteLeSale.stream()
-                .map(sala -> CompletableFuture.supplyAsync(() -> {
-                    try {
-                        return getPrenotazioni(sala.getEmail(), dataInizio, dataFine, jwt);
-                    } catch (ApiException e) {
-                        log.error("Errore Graph API (status {}) per sala {}: {}", e.getResponseStatusCode(),
-                                sala.getEmail(), e.getMessage());
-                        throw e;
-                    } catch (Exception e) {
-                        log.error("Errore recupero prenotazioni per sala {}: {}", sala.getEmail(), e.getMessage(), e);
-                        throw new RuntimeException(
-                                "Errore recupero prenotazioni per sala " + sala.getNome() + ": " + e.getMessage(), e);
-                    }
-                }, executorGraphParallelo)
-                        .orTimeout(12, TimeUnit.SECONDS))
+        record SalaTask(SalaDTO sala, CompletableFuture<List<PrenotazioneDTO>> future) {}
+
+        List<SalaTask> tasks = tutteLeSale.stream()
+                .map(sala -> {
+                    CompletableFuture<List<PrenotazioneDTO>> future = CompletableFuture.supplyAsync(() -> {
+                        try {
+                            return getPrenotazioni(sala.getEmail(), dataInizio, dataFine, jwt);
+                        } catch (ApiException e) {
+                            log.error("Errore Graph API (status {}) per sala {}: {}", e.getResponseStatusCode(),
+                                    sala.getEmail(), e.getMessage());
+                            throw e;
+                        } catch (Exception e) {
+                            log.error("Errore recupero prenotazioni per sala {}: {}", sala.getEmail(), e.getMessage(), e);
+                            throw new RuntimeException(
+                                    "Errore recupero prenotazioni per sala " + sala.getNome() + ": " + e.getMessage(), e);
+                        }
+                    }, executorGraphParallelo)
+                    .orTimeout(12, TimeUnit.SECONDS);
+                    return new SalaTask(sala, future);
+                })
                 .collect(Collectors.toList());
 
-        return futures.stream()
-                .map(f -> f.join())
-                .flatMap(list -> list.stream())
-                .collect(Collectors.toList());
+        // Attende il completamento di tutti i task senza propagare anticipatamente eccezioni
+        CompletableFuture.allOf(tasks.stream().map(SalaTask::future).toArray(CompletableFuture[]::new))
+                .exceptionally(ex -> null)
+                .join();
+
+        List<PrenotazioneDTO> allPrenotazioni = new ArrayList<>();
+        List<SalaNonDisponibileDTO> saleNonDisponibili = new ArrayList<>();
+        SalaTask primoTaskFallito = null;
+
+        for (SalaTask task : tasks) {
+            try {
+                List<PrenotazioneDTO> prenotazioni = task.future().join();
+                if (prenotazioni != null) {
+                    allPrenotazioni.addAll(prenotazioni);
+                }
+            } catch (Throwable t) {
+                if (primoTaskFallito == null) {
+                    primoTaskFallito = task;
+                }
+                String motivo = classifyError(t);
+                saleNonDisponibili.add(SalaNonDisponibileDTO.builder()
+                        .salaEmail(task.sala().getEmail())
+                        .salaNome(task.sala().getNome())
+                        .motivo(motivo)
+                        .build());
+            }
+        }
+
+        // Se tutte le sale hanno fallito, rilancia l'errore originale del primo task fallito
+        if (saleNonDisponibili.size() == tasks.size()) {
+            primoTaskFallito.future().join();
+        }
+
+        boolean parziale = !saleNonDisponibili.isEmpty();
+        return PrenotazioniTutteSaleResponse.builder()
+                .prenotazioni(allPrenotazioni)
+                .saleNonDisponibili(saleNonDisponibili)
+                .parziale(parziale)
+                .totaleSale(tutteLeSale.size())
+                .build();
+    }
+
+    private String classifyError(Throwable t) {
+        Throwable curr = t;
+        while (curr != null) {
+            if (curr instanceof TimeoutException) {
+                return "TIMEOUT";
+            }
+            if (curr instanceof ApiException || curr instanceof GraphPaginationException) {
+                return "ERRORE_GRAPH";
+            }
+            curr = curr.getCause();
+        }
+        return "ERRORE_INTERNO";
     }
 
     /**
