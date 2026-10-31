@@ -103,9 +103,9 @@ public class PrenotazioneMapperTest {
         }
 
         @Test
-        @DisplayName("Dovrebbe restituire null se la request è null")
-        void testBuildEvent_NullRequest_ReturnsNull() {
-            assertNull(mapper.buildEvent(null));
+        @DisplayName("Dovrebbe lanciare NullPointerException se la request è null")
+        void testBuildEvent_NullRequest_ThrowsNpe() {
+            assertThrows(NullPointerException.class, () -> mapper.buildEvent(null));
         }
     }
 
@@ -300,8 +300,12 @@ public class PrenotazioneMapperTest {
             assertFalse(dto.isRicorrente());
             assertNull(dto.getSeriesMasterId());
             assertNull(dto.getPattern());
+        }
 
-            assertNull(mapper.mapToDTO(null, "sala-dohrn@szn.it", true));
+        @Test
+        @DisplayName("Dovrebbe lanciare NullPointerException se l'evento è null")
+        void testMapToDTO_NullEvent_ThrowsNpe() {
+            assertThrows(NullPointerException.class, () -> mapper.mapToDTO(null, "sala-dohrn@szn.it", true));
         }
     }
 
@@ -342,10 +346,10 @@ public class PrenotazioneMapperTest {
         }
 
         @Test
-        @DisplayName("Dovrebbe gestire event o request nulli senza lanciare eccezioni")
-        void testImpostaTitoloEDescrizione_NullSafety() {
-            assertDoesNotThrow(() -> mapper.impostaTitoloEDescrizione(null, new PrenotazioneRequestDTO()));
-            assertDoesNotThrow(() -> mapper.impostaTitoloEDescrizione(new Event(), null));
+        @DisplayName("Dovrebbe lanciare NullPointerException se event o request sono null")
+        void testImpostaTitoloEDescrizione_NullParameters_ThrowsNpe() {
+            assertThrows(NullPointerException.class, () -> mapper.impostaTitoloEDescrizione(null, new PrenotazioneRequestDTO()));
+            assertThrows(NullPointerException.class, () -> mapper.impostaTitoloEDescrizione(new Event(), null));
         }
     }
 }

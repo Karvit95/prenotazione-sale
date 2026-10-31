@@ -35,9 +35,6 @@ public class PrenotazioneMapper {
      * @param request payload con i dati della prenotazione
      */
     public void impostaTitoloEDescrizione(Event event, PrenotazioneRequestDTO request) {
-        if (event == null || request == null) {
-            return;
-        }
         event.setSubject(validator.stripHtml(request.getTitolo()));
 
         if (request.getDescrizione() != null) {
@@ -57,9 +54,6 @@ public class PrenotazioneMapper {
      * @return oggetto Event pronto per la creazione su Microsoft Graph
      */
     public Event buildEvent(PrenotazioneRequestDTO request) {
-        if (request == null) {
-            return null;
-        }
         log.debug("Costruzione evento per sala {}: start={}, end={}", request.getSalaEmail(), request.getStart(),
                 request.getEnd());
         var event = new Event();
@@ -149,9 +143,6 @@ public class PrenotazioneMapper {
      * @return DTO rappresentativo della prenotazione
      */
     public PrenotazioneDTO mapToDTO(Event event, String salaEmail, boolean modificabile) {
-        if (event == null) {
-            return null;
-        }
         String seriesMasterId = null;
         boolean ricorrente = false;
         String pattern = null;
