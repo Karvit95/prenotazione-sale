@@ -31,6 +31,7 @@ import java.util.concurrent.TimeoutException;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
@@ -416,6 +417,38 @@ class GlobalExceptionHandlerIntegrationTest {
                                 any(Jwt.class),
                                 any(),
                                 argThat(details -> "SERIE".equals(details.get("tipoCancellazione"))));
+        }
+
+        @Test
+        @DisplayName("DELETE con tipoCancellazione non valido (es. FOO) deve restituire 400 Bad Request")
+        void testDeletePrenotazione_InvalidTipoCancellazione_Returns400BadRequest() throws Exception {
+                mockMvc.perform(delete("/api/prenotazioni/event-invalid-1")
+                                .header("Authorization", "Bearer " + validAdminToken)
+                                .param("salaEmail", "sala1@szn.it")
+                                .param("tipoCancellazione", "FOO"))
+                                .andExpect(status().isBadRequest())
+                                .andExpect(jsonPath("$.status").value(400))
+                                .andExpect(jsonPath("$.message")
+                                                .value("Il tipo cancellazione deve essere 'SERIE' o 'SINGOLA'"));
+
+                verify(prenotazioniService, never()).cancellaPrenotazione(any(), any(), any(), any(), any());
+        }
+
+        @Test
+        @DisplayName("DELETE con tipoCancellazione minuscolo (es. serie) viene accettato e normalizzato in maiuscolo")
+        void testDeletePrenotazione_CaseInsensitive_NormalizedToUpperCase() throws Exception {
+                mockMvc.perform(delete("/api/prenotazioni/event-case-1")
+                                .header("Authorization", "Bearer " + validAdminToken)
+                                .param("salaEmail", "sala1@szn.it")
+                                .param("tipoCancellazione", "serie"))
+                                .andExpect(status().isNoContent());
+
+                verify(prenotazioniService).cancellaPrenotazione(
+                                eq("event-case-1"),
+                                eq("sala1@szn.it"),
+                                eq("SERIE"),
+                                isNull(),
+                                any(Jwt.class));
         }
 
         // =========================================================================

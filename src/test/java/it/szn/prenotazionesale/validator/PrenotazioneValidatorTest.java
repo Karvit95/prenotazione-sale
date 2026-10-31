@@ -487,4 +487,30 @@ public class PrenotazioneValidatorTest {
             assertEquals(LocalDateTime.parse("2027-02-10T10:00:00"), occ.get(3)[0]);
         }
     }
+
+    @Nested
+    @DisplayName("9. Validazione Tipo Cancellazione (validaTipoCancellazione)")
+    class TipoCancellazioneValidationTests {
+
+        @Test
+        @DisplayName("Dovrebbe accettare SERIE e SINGOLA in qualsiasi combinazione maiuscolo/minuscolo")
+        void testValidaTipoCancellazione_ValidValues() {
+            assertDoesNotThrow(() -> validator.validaTipoCancellazione("SERIE"));
+            assertDoesNotThrow(() -> validator.validaTipoCancellazione("SINGOLA"));
+            assertDoesNotThrow(() -> validator.validaTipoCancellazione("serie"));
+            assertDoesNotThrow(() -> validator.validaTipoCancellazione("singola"));
+            assertDoesNotThrow(() -> validator.validaTipoCancellazione("Serie"));
+            assertDoesNotThrow(() -> validator.validaTipoCancellazione("Singola"));
+        }
+
+        @Test
+        @DisplayName("Dovrebbe sollevare IllegalArgumentException se tipoCancellazione è null, vuoto o non riconosciuto")
+        void testValidaTipoCancellazione_InvalidValues_ThrowsException() {
+            assertThrows(IllegalArgumentException.class, () -> validator.validaTipoCancellazione(null));
+            assertThrows(IllegalArgumentException.class, () -> validator.validaTipoCancellazione(""));
+            assertThrows(IllegalArgumentException.class, () -> validator.validaTipoCancellazione("   "));
+            assertThrows(IllegalArgumentException.class, () -> validator.validaTipoCancellazione("FOO"));
+            assertThrows(IllegalArgumentException.class, () -> validator.validaTipoCancellazione("TUTTE"));
+        }
+    }
 }

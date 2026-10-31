@@ -28,6 +28,8 @@ public class PrenotazioneValidator {
     private static final Pattern PATTERN_XSS_PERICOLOSO = Pattern.compile(
             "(?is)<\\s*(script|iframe|object|embed|svg|style)\\b|javascript\\s*:|on[a-z]{2,20}\\s*=");
 
+    private static final Pattern PATTERN_TIPO_CANCELLAZIONE = Pattern.compile("^(?i)(SERIE|SINGOLA)$");
+
     private static final LocalTime ORA_APERTURA = LocalTime.of(8, 0);
     private static final LocalTime ORA_CHIUSURA = LocalTime.of(20, 0);
     private static final ZoneId ZONA_ROMA = ZoneId.of("Europe/Rome");
@@ -253,6 +255,18 @@ public class PrenotazioneValidator {
                 && (request.getIntervallo() < 1 || request.getIntervallo() > MAX_INTERVALLO)) {
             throw new IllegalArgumentException(
                     "L'intervallo di ricorrenza deve essere compreso tra 1 e " + MAX_INTERVALLO + ".");
+        }
+    }
+
+    /**
+     * Valida che il tipo di cancellazione sia 'SERIE' o 'SINGOLA' (case-insensitive).
+     *
+     * @param tipoCancellazione valore del parametro
+     * @throws IllegalArgumentException se il tipo non è né 'SERIE' né 'SINGOLA'
+     */
+    public void validaTipoCancellazione(String tipoCancellazione) {
+        if (tipoCancellazione == null || !PATTERN_TIPO_CANCELLAZIONE.matcher(tipoCancellazione.trim()).matches()) {
+            throw new IllegalArgumentException("Il tipo cancellazione deve essere 'SERIE' o 'SINGOLA'");
         }
     }
 

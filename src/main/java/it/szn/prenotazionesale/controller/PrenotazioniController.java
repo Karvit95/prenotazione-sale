@@ -108,14 +108,18 @@ public class PrenotazioniController {
             @RequestParam(defaultValue = "SINGOLA") String tipoCancellazione,
             @RequestParam(required = false) String seriesMasterId,
             @AuthenticationPrincipal Jwt jwt) {
+        if (tipoCancellazione == null || (!tipoCancellazione.equalsIgnoreCase("SERIE") && !tipoCancellazione.equalsIgnoreCase("SINGOLA"))) {
+            throw new IllegalArgumentException("Il tipo cancellazione deve essere 'SERIE' o 'SINGOLA'");
+        }
+        String tipoNorm = tipoCancellazione.toUpperCase();
         log.info("DELETE /api/prenotazioni/{} - sala: {}, tipo: {}, seriesMasterId: {}",
-                eventId, salaEmail, tipoCancellazione, seriesMasterId);
-        prenotazioniService.cancellaPrenotazione(eventId, salaEmail, tipoCancellazione, seriesMasterId, jwt);
+                eventId, salaEmail, tipoNorm, seriesMasterId);
+        prenotazioniService.cancellaPrenotazione(eventId, salaEmail, tipoNorm, seriesMasterId, jwt);
         log.info("DELETE /api/prenotazioni/{} - cancellata con successo", eventId);
 
         auditService.logSuccess("DELETE_BOOKING", eventId, jwt, httpServletRequest, Map.of(
                 "salaEmail", salaEmail,
-                "tipoCancellazione", tipoCancellazione,
+                "tipoCancellazione", tipoNorm,
                 "seriesMasterId", seriesMasterId != null ? seriesMasterId : ""
         ));
 

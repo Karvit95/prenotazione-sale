@@ -584,6 +584,7 @@ public class PrenotazioniService {
         log.info("Cancellazione prenotazione ID {} per sala {} (tipo: {}, seriesMasterId: {})", eventId, salaEmail,
                 tipoCancellazione, seriesMasterId);
         verificaAdmin(jwt);
+        validator.validaTipoCancellazione(tipoCancellazione);
 
         conLockSala(salaEmail, () -> {
             String idSuCuiOperare = "SERIE".equals(tipoCancellazione) && seriesMasterId != null
