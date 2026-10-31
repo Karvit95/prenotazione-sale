@@ -99,13 +99,13 @@ public class PrenotazioniController {
         return ResponseEntity.ok(result);
     }
 
-    // DELETE /api/prenotazioni/{eventId}?salaEmail=...&tipoCancellazione=SERIE&seriesMasterId=...
+    // DELETE /api/prenotazioni/{eventId}?salaEmail=...&tipoCancellazione=SINGOLA&seriesMasterId=... (default: SINGOLA)
     @PreAuthorize("hasRole('RoomBooking.Admin')")
     @DeleteMapping("/{eventId}")
     public ResponseEntity<Void> cancellaPrenotazione(
             @PathVariable String eventId,
             @RequestParam String salaEmail,
-            @RequestParam(defaultValue = "SERIE") String tipoCancellazione,
+            @RequestParam(defaultValue = "SINGOLA") String tipoCancellazione,
             @RequestParam(required = false) String seriesMasterId,
             @AuthenticationPrincipal Jwt jwt) {
         log.info("DELETE /api/prenotazioni/{} - sala: {}, tipo: {}, seriesMasterId: {}",

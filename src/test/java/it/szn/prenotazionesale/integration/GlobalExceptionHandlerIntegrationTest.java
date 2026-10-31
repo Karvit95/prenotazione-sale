@@ -34,6 +34,7 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -364,6 +365,57 @@ class GlobalExceptionHandlerIntegrationTest {
                 assertNoInformationDisclosure(body);
                 assertFalse(body.contains("AccessDeniedException"),
                                 "Nomi di classi Spring Security non devono trapelare");
+        }
+
+        // =========================================================================
+        // 5. DEFAULT TIPO CANCELLAZIONE (DELETE /api/prenotazioni)
+        // =========================================================================
+
+        @Test
+        @DisplayName("DELETE senza tipoCancellazione deve assumere di default 'SINGOLA' sia verso il service che nell'audit")
+        void testDeletePrenotazione_DefaultTipoCancellazione_IsSingola() throws Exception {
+                mockMvc.perform(delete("/api/prenotazioni/event-default-1")
+                                .header("Authorization", "Bearer " + validAdminToken)
+                                .param("salaEmail", "sala1@szn.it"))
+                                .andExpect(status().isNoContent());
+
+                verify(prenotazioniService).cancellaPrenotazione(
+                                eq("event-default-1"),
+                                eq("sala1@szn.it"),
+                                eq("SINGOLA"),
+                                isNull(),
+                                any(Jwt.class));
+
+                verify(auditService).logSuccess(
+                                eq("DELETE_BOOKING"),
+                                eq("event-default-1"),
+                                any(Jwt.class),
+                                any(),
+                                argThat(details -> "SINGOLA".equals(details.get("tipoCancellazione"))));
+        }
+
+        @Test
+        @DisplayName("DELETE con tipoCancellazione=SERIE esplicito deve propagare 'SERIE' sia verso il service che nell'audit")
+        void testDeletePrenotazione_ExplicitSerie_PropagatesSerie() throws Exception {
+                mockMvc.perform(delete("/api/prenotazioni/event-serie-1")
+                                .header("Authorization", "Bearer " + validAdminToken)
+                                .param("salaEmail", "sala1@szn.it")
+                                .param("tipoCancellazione", "SERIE"))
+                                .andExpect(status().isNoContent());
+
+                verify(prenotazioniService).cancellaPrenotazione(
+                                eq("event-serie-1"),
+                                eq("sala1@szn.it"),
+                                eq("SERIE"),
+                                isNull(),
+                                any(Jwt.class));
+
+                verify(auditService).logSuccess(
+                                eq("DELETE_BOOKING"),
+                                eq("event-serie-1"),
+                                any(Jwt.class),
+                                any(),
+                                argThat(details -> "SERIE".equals(details.get("tipoCancellazione"))));
         }
 
         // =========================================================================
