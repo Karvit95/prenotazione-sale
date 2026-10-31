@@ -1,7 +1,7 @@
 package it.szn.prenotazionesale.service;
 
 import com.microsoft.graph.models.*;
-import com.microsoft.graph.serviceclient.GraphServiceClient;
+import it.szn.prenotazionesale.graph.GraphCalendarGateway;
 import com.microsoft.kiota.ApiException;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
@@ -36,10 +36,8 @@ import java.util.stream.Collectors;
  * Servizio per la gestione operativa delle prenotazioni delle sale riunioni.
  * Interagisce con Microsoft 365 Exchange Online tramite le API Microsoft Graph.
  *
- * ResponsabilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  principali:
- * - Consultazione degli eventi e delle
- * disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  (tramite calendarView
- * per espansione ricorrenze).
+ * Responsabilità principali:
+ * - Consultazione degli eventi e delle disponibilità (tramite gateway per espansione ricorrenze).
  * - Creazione, aggiornamento e cancellazione di prenotazioni singole e serie
  * ricorrenti.
  * - Migrazione atomica di eventi tra sale diverse (cambio sala) con logica di
@@ -51,29 +49,26 @@ import java.util.stream.Collectors;
 @Service
 public class PrenotazioniService {
 
-    private final GraphServiceClient graphClient;
+    private final GraphCalendarGateway calendarGateway;
     private final SaleService saleService;
     private final AppConfig appConfig;
     private final ThreadPoolTaskExecutor executorGraphParallelo;
 
     /**
      * Mappa dei lock rientranti per singola sala.
-     * Serializza le operazioni di verifica
-     * disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  e successiva scrittura
-     * su Microsoft Graph
-     * per la medesima sala, prevenendo race condition da prenotazioni simultanee
-     * sovrapposte (TOCTOU).
-     * Ogni lock opera in memoria locale con timeout per prevenire blocchi
-     * indefiniti dei thread.
+     * Serializza le operazioni di verifica disponibilità e successiva scrittura
+     * tramite gateway Microsoft Graph per la medesima sala, prevenendo race condition
+     * da prenotazioni simultanee sovrapposte (TOCTOU).
+     * Ogni lock opera in memoria locale con timeout per prevenire blocchi indefiniti dei thread.
      */
     private final ConcurrentHashMap<String, ReentrantLock> lockPerSala = new ConcurrentHashMap<>();
 
     public PrenotazioniService(
-            GraphServiceClient graphClient,
+            GraphCalendarGateway calendarGateway,
             SaleService saleService,
             AppConfig appConfig,
             @Qualifier("graphQueryExecutor") ThreadPoolTaskExecutor executorGraphParallelo) {
-        this.graphClient = graphClient;
+        this.calendarGateway = calendarGateway;
         this.saleService = saleService;
         this.appConfig = appConfig;
         this.executorGraphParallelo = executorGraphParallelo;
@@ -125,7 +120,7 @@ public class PrenotazioniService {
 
     /**
      * Protezione DoS (SEC-05): convalida formato, ordine cronologico e ampiezza massima
-     * dell'intervallo temporale su calendarView per impedire espansioni di memoria illimitate.
+     * dell'intervallo temporale per impedire espansioni di memoria illimitate.
      */
     private void validaIntervalloDate(String dataInizioStr, String dataFineStr) {
         validaParametroFiltroData(dataInizioStr, "dataInizio");
@@ -202,8 +197,7 @@ public class PrenotazioniService {
     /**
      * Recupera le prenotazioni confermate per una specifica sala nell'intervallo
      * temporale richiesto.
-     * Utilizza l'endpoint calendarView di Microsoft Graph per espandere
-     * automaticamente tutte
+     * Utilizza il gateway Graph per espandere automaticamente tutte
      * le occorrenze delle serie ricorrenti nel periodo indicato, convertite nel
      * fuso Europe/Rome.
      *
@@ -223,11 +217,7 @@ public class PrenotazioniService {
         validaIntervalloDate(dataInizio, dataFine);
 
         String salaNormalizzata = salaEmail.trim().toLowerCase();
-        var events = graphClient.users().byUserId(salaNormalizzata).calendarView().get(req -> {
-            req.queryParameters.startDateTime = dataInizio;
-            req.queryParameters.endDateTime = dataFine;
-            req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
-        }).getValue();
+        var events = calendarGateway.getEventi(salaNormalizzata, dataInizio, dataFine);
 
         log.debug("Trovati {} eventi per la sala {}", events.size(), salaNormalizzata);
 
@@ -305,7 +295,7 @@ public class PrenotazioniService {
             }
             verificaDisponibilita(request, null, jwt);
             var event = buildEvent(request);
-            var createdEvent = graphClient.users().byUserId(request.getSalaEmail()).calendar().events().post(event);
+            var createdEvent = calendarGateway.creaEvento(request.getSalaEmail(), event);
 
             log.info("Prenotazione creata con ID {}", createdEvent.getId());
             return mapToDTO(createdEvent, request.getSalaEmail(), jwt);
@@ -396,14 +386,9 @@ public class PrenotazioniService {
                     log.info("Modifica serie su cambio sala: recupero master originale ID {} dalla sala {}",
                             request.getSeriesMasterId(), salaOriginale);
 
-                    var masterOriginale = graphClient.users().byUserId(salaOriginale).events()
-                            .byEventId(request.getSeriesMasterId()).get(req -> {
-                                req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
-                            });
+                    var masterOriginale = calendarGateway.getEvento(salaOriginale, request.getSeriesMasterId());
 
-                    // Verifica preliminare di
-                    // disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  della sala di
-                    // destinazione per l'intera durata della serie
+                    // Verifica preliminare di disponibilità della sala di destinazione per l'intera durata della serie
                     PrenotazioneRequestDTO checkRequest = new PrenotazioneRequestDTO();
                     checkRequest.setSalaEmail(request.getSalaEmail());
                     checkRequest.setStart(masterOriginale.getStart().getDateTime());
@@ -474,8 +459,7 @@ public class PrenotazioniService {
                         nuovoEvento.setRecurrence(nuovaRecurrence);
                     }
 
-                    var createdEvent = graphClient.users().byUserId(request.getSalaEmail()).calendar().events()
-                            .post(nuovoEvento);
+                    var createdEvent = calendarGateway.creaEvento(request.getSalaEmail(), nuovoEvento);
 
                     log.info("Nuova serie creata con ID {} nella sala {} (originata dal master {})",
                             createdEvent.getId(), request.getSalaEmail(), request.getSeriesMasterId());
@@ -495,7 +479,7 @@ public class PrenotazioniService {
                         : eventId;
 
                 try {
-                    graphClient.users().byUserId(salaOriginale).events().byEventId(idDaCancellare).delete();
+                    calendarGateway.eliminaEvento(salaOriginale, idDaCancellare);
                 } catch (Exception e) {
                     // Rollback compensativo: elimina l'evento appena creato per evitare la
                     // persistenza di duplicati
@@ -503,8 +487,7 @@ public class PrenotazioniService {
                             "Cancellazione evento originale {} su sala {} fallita. Tento rollback dell'evento creato {} su sala {}",
                             idDaCancellare, salaOriginale, nuovaPrenotazione.getId(), request.getSalaEmail(), e);
                     try {
-                        graphClient.users().byUserId(request.getSalaEmail()).events()
-                                .byEventId(nuovaPrenotazione.getId()).delete();
+                        calendarGateway.eliminaEvento(request.getSalaEmail(), nuovaPrenotazione.getId());
                         log.info("Rollback completato con successo: eliminato evento {}", nuovaPrenotazione.getId());
                     } catch (Exception rollbackEx) {
                         log.error("[SECURITY_INCIDENT - ROLLBACK_FAILURE] Rollback fallito per ID {} su sala {}: {}",
@@ -572,10 +555,7 @@ public class PrenotazioniService {
                 try {
                     // Recupera il master per preservarne la data d'inizio originale calcolando il
                     // nuovo orario giornaliero
-                    var existingMaster = graphClient.users().byUserId(request.getSalaEmail()).events()
-                            .byEventId(idSuCuiOperare).get(req -> {
-                                req.headers.add("Prefer", "outlook.timezone=\"Europe/Rome\"");
-                            });
+                    var existingMaster = calendarGateway.getEvento(request.getSalaEmail(), idSuCuiOperare);
 
                     String dataOriginaleMaster = existingMaster.getStart().getDateTime().substring(0, 10);
 
@@ -624,8 +604,7 @@ public class PrenotazioniService {
                     event.setEnd(end);
                 }
 
-                var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events()
-                        .byEventId(idSuCuiOperare).patch(event);
+                var updatedEvent = calendarGateway.aggiornaEvento(request.getSalaEmail(), idSuCuiOperare, event);
                 log.info("Prenotazione (serie, ID {}) modificata con successo", idSuCuiOperare);
                 return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
             } else {
@@ -652,8 +631,7 @@ public class PrenotazioniService {
                 end.setTimeZone("Europe/Rome");
                 event.setEnd(end);
 
-                var updatedEvent = graphClient.users().byUserId(request.getSalaEmail()).events().byEventId(eventId)
-                        .patch(event);
+                var updatedEvent = calendarGateway.aggiornaEvento(request.getSalaEmail(), eventId, event);
                 log.info("Prenotazione (occorrenza singola) {} modificata con successo", eventId);
                 return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
             }
@@ -709,15 +687,11 @@ public class PrenotazioniService {
                             ? seriesMasterId
                             : eventId;
 
-            // Recupera l'evento dalla sala per verificare se l'organizzatore ÃƒÆ’Ã‚Â¨ un utente
-            // esterno/Outlook
+            // Recupera l'evento dalla sala per verificare se l'organizzatore è un utente esterno/Outlook
             Event eventoDaCancellare = null;
             try {
-                eventoDaCancellare = graphClient.users().byUserId(salaEmail).events().byEventId(idSuCuiOperare)
-                        .get(req -> {
-                            req.queryParameters.select = new String[] { "id", "isOrganizer", "organizer", "iCalUId",
-                                    "seriesMasterId", "start", "end" };
-                        });
+                eventoDaCancellare = calendarGateway.getEvento(salaEmail, idSuCuiOperare,
+                        "id", "isOrganizer", "organizer", "iCalUId", "seriesMasterId", "start", "end");
             } catch (Exception e) {
                 log.warn("Impossibile recuperare metadati preliminari dell'evento {} per sala {}: {}", idSuCuiOperare,
                         salaEmail, e.getMessage());
@@ -745,35 +719,14 @@ public class PrenotazioniService {
                                 "L'evento {} appartiene al calendario personale di {} (iCalUId: {}). Rimozione alla radice.",
                                 idSuCuiOperare, organizerEmail, iCalUId);
                         try {
-                            final String startIso = (eventoDaCancellare.getStart() != null)
-                                    ? eventoDaCancellare.getStart().getDateTime()
-                                    : null;
-                            final String endIso = (eventoDaCancellare.getEnd() != null)
-                                    ? eventoDaCancellare.getEnd().getDateTime()
-                                    : null;
                             final String oDataFilter = "iCalUId eq '" + escapeODataString(iCalUId) + "'";
 
-                            List<Event> eventiOrganizzatore = null;
-                            if ("SINGOLA".equals(tipoCancellazione) && startIso != null && endIso != null) {
-                                var viewPage = graphClient.users().byUserId(organizerEmail).calendarView().get(req -> {
-                                    req.queryParameters.startDateTime = startIso;
-                                    req.queryParameters.endDateTime = endIso;
-                                    req.queryParameters.filter = oDataFilter;
-                                });
-                                eventiOrganizzatore = viewPage != null ? viewPage.getValue() : null;
-                            } else {
-                                var eventsPage = graphClient.users().byUserId(organizerEmail).events().get(req -> {
-                                    req.queryParameters.filter = oDataFilter;
-                                });
-                                eventiOrganizzatore = eventsPage != null ? eventsPage.getValue() : null;
-                            }
+                            List<Event> eventiOrganizzatore = calendarGateway.cercaEventiPerFiltro(organizerEmail, oDataFilter);
 
                             if (eventiOrganizzatore != null && !eventiOrganizzatore.isEmpty()) {
                                 for (Event orgEvent : eventiOrganizzatore) {
                                     if (iCalUId.equalsIgnoreCase(orgEvent.getICalUId())) {
-                                        graphClient.users().byUserId(organizerEmail).events()
-                                                .byEventId(orgEvent.getId())
-                                                .delete();
+                                        calendarGateway.eliminaEvento(organizerEmail, orgEvent.getId());
                                         log.info(
                                                 "Evento {} cancellato con successo dal calendario dell'organizzatore {}",
                                                 orgEvent.getId(), organizerEmail);
@@ -790,15 +743,15 @@ public class PrenotazioniService {
                 }
             }
 
-            // Rimuove la copia dalla sala (se non giÃƒÆ’Ã‚Â  rimossa a catena da Exchange)
+            // Rimuove la copia dalla sala (se non già rimossa a catena da Exchange)
             try {
-                graphClient.users().byUserId(salaEmail).events().byEventId(idSuCuiOperare).delete();
+                calendarGateway.eliminaEvento(salaEmail, idSuCuiOperare);
                 log.info("Prenotazione {} cancellata dalla sala {} (tipo richiesto: {})", idSuCuiOperare, salaEmail,
                         tipoCancellazione);
             } catch (ApiException apiEx) {
                 if (apiEx.getResponseStatusCode() == 404 && cancellatoDaOrganizzatore) {
                     log.info(
-                            "L'evento {} della sala {} risulta giÃƒÆ’Ã‚Â  rimosso da Exchange in seguito alla cancellazione dell'organizzatore.",
+                            "L'evento {} della sala {} risulta già rimosso da Exchange in seguito alla cancellazione dell'organizzatore.",
                             idSuCuiOperare, salaEmail);
                 } else {
                     throw apiEx;

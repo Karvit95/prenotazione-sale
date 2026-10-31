@@ -1,6 +1,6 @@
 package it.szn.prenotazionesale.security;
 
-import com.microsoft.graph.serviceclient.GraphServiceClient;
+import it.szn.prenotazionesale.graph.GraphCalendarGateway;
 import it.szn.prenotazionesale.config.AppConfig;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
 import it.szn.prenotazionesale.model.SalaDTO;
@@ -27,7 +27,7 @@ class SecurityHardeningTest {
 
     @BeforeEach
     void setUp() {
-        GraphServiceClient graphClient = Mockito.mock(GraphServiceClient.class);
+        GraphCalendarGateway calendarGateway = Mockito.mock(GraphCalendarGateway.class);
         saleService = Mockito.mock(SaleService.class);
         appConfig = new AppConfig();
         appConfig.setAdminRole("RoomBooking.Admin");
@@ -41,7 +41,7 @@ class SecurityHardeningTest {
                 SalaDTO.builder().id("sala1@szn.it").nome("Sala Dohrn").email("sala1@szn.it").build()
         ));
 
-        prenotazioniService = new PrenotazioniService(graphClient, saleService, appConfig, executor);
+        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor);
     }
 
     private Jwt buildMockAdminJwt() {

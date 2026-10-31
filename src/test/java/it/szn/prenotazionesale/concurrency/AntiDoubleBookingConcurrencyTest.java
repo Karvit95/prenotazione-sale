@@ -1,8 +1,7 @@
 package it.szn.prenotazionesale.concurrency;
 
 import com.microsoft.graph.models.Event;
-import com.microsoft.graph.models.EventCollectionResponse;
-import com.microsoft.graph.serviceclient.GraphServiceClient;
+import it.szn.prenotazionesale.graph.GraphCalendarGateway;
 import it.szn.prenotazionesale.audit.SecurityAuditService;
 import it.szn.prenotazionesale.config.AppConfig;
 import it.szn.prenotazionesale.controller.PrenotazioniController;
@@ -17,7 +16,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.mockito.Answers;
 import org.mockito.Mockito;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -59,7 +57,7 @@ public class AntiDoubleBookingConcurrencyTest {
     private static final String START_TIME = "2026-11-15T10:00:00";
     private static final String END_TIME = "2026-11-15T11:00:00";
 
-    private GraphServiceClient graphClient;
+    private GraphCalendarGateway calendarGateway;
     private SaleService saleService;
     private AppConfig appConfig;
     private ThreadPoolTaskExecutor taskExecutor;
@@ -75,7 +73,7 @@ public class AntiDoubleBookingConcurrencyTest {
     void setUp() {
         backendEventsStorage = new CopyOnWriteArrayList<>();
 
-        graphClient = Mockito.mock(GraphServiceClient.class, Answers.RETURNS_DEEP_STUBS);
+        calendarGateway = Mockito.mock(GraphCalendarGateway.class);
         saleService = Mockito.mock(SaleService.class);
 
         appConfig = new AppConfig();
@@ -91,18 +89,14 @@ public class AntiDoubleBookingConcurrencyTest {
                 SalaDTO.builder().id("room-2").nome("Sala Polifunzionale").email(SALA2_EMAIL).build()
         ));
 
-        // Mock Graph calendarView().get(...) per restituire gli eventi attualmente salvati nel backend simulato
-        when(graphClient.users().byUserId(anyString()).calendarView().get(any()))
-                .thenAnswer(invocation -> {
-                    EventCollectionResponse response = new EventCollectionResponse();
-                    response.setValue(new ArrayList<>(backendEventsStorage));
-                    return response;
-                });
+        // Mock gateway per restituire gli eventi attualmente salvati nel backend simulato
+        when(calendarGateway.getEventi(anyString(), anyString(), anyString()))
+                .thenAnswer(invocation -> new ArrayList<>(backendEventsStorage));
 
-        // Mock Graph calendar().events().post(...) per salvare l'evento con simulazione di latenza I/O
-        when(graphClient.users().byUserId(anyString()).calendar().events().post(any(Event.class)))
+        // Mock gateway creaEvento per salvare l'evento con simulazione di latenza I/O
+        when(calendarGateway.creaEvento(anyString(), any(Event.class)))
                 .thenAnswer(invocation -> {
-                    Event eventToSave = invocation.getArgument(0);
+                    Event eventToSave = invocation.getArgument(1);
                     Event savedEvent = new Event();
                     savedEvent.setId("event-" + UUID.randomUUID());
                     savedEvent.setSubject(eventToSave.getSubject());
@@ -121,7 +115,7 @@ public class AntiDoubleBookingConcurrencyTest {
                     return savedEvent;
                 });
 
-        prenotazioniService = new PrenotazioniService(graphClient, saleService, appConfig, taskExecutor);
+        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, taskExecutor);
 
         auditService = Mockito.mock(SecurityAuditService.class);
         controller = new PrenotazioniController(prenotazioniService, auditService, new MockHttpServletRequest());
@@ -303,7 +297,7 @@ public class AntiDoubleBookingConcurrencyTest {
     @DisplayName("Resilienza: rilascio garantito del lock nel blocco finally in caso di eccezione durante la creazione")
     void testLockReleaseOnGraphException_PreventsDeadlockForSubsequentRequests() {
         // Simuliamo un errore Graph API durante la chiamata di post
-        when(graphClient.users().byUserId(anyString()).calendar().events().post(any(Event.class)))
+        when(calendarGateway.creaEvento(anyString(), any(Event.class)))
                 .thenThrow(new RuntimeException("Simulazione errore imprevisto Microsoft Graph API"));
 
         Jwt jwt = buildAdminJwt("user-err");
@@ -319,9 +313,9 @@ public class AntiDoubleBookingConcurrencyTest {
         assertEquals(0, lock.getHoldCount());
 
         // Ripristiniamo il funzionamento normale di Graph per verificare che la sala sia ancora prenotabile
-        when(graphClient.users().byUserId(anyString()).calendar().events().post(any(Event.class)))
+        when(calendarGateway.creaEvento(anyString(), any(Event.class)))
                 .thenAnswer(inv -> {
-                    Event event = inv.getArgument(0);
+                    Event event = inv.getArgument(1);
                     event.setId("recovered-id-123");
                     backendEventsStorage.add(event);
                     return event;

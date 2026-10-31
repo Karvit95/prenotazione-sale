@@ -2,8 +2,7 @@ package it.szn.prenotazionesale.unit;
 
 import com.microsoft.graph.models.DateTimeTimeZone;
 import com.microsoft.graph.models.Event;
-import com.microsoft.graph.models.EventCollectionResponse;
-import com.microsoft.graph.serviceclient.GraphServiceClient;
+import it.szn.prenotazionesale.graph.GraphCalendarGateway;
 import it.szn.prenotazionesale.config.AppConfig;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
@@ -40,8 +39,8 @@ import static org.mockito.Mockito.*;
 @org.mockito.junit.jupiter.MockitoSettings(strictness = org.mockito.quality.Strictness.LENIENT)
 public class BusinessHoursAndOverlapUnitTest {
 
-    @Mock(answer = org.mockito.Answers.RETURNS_DEEP_STUBS)
-    private GraphServiceClient graphClient;
+    @Mock
+    private GraphCalendarGateway calendarGateway;
 
     @Mock
     private SaleService saleService;
@@ -68,7 +67,7 @@ public class BusinessHoursAndOverlapUnitTest {
                 SalaDTO.builder().id(SALA_ALTRA).nome("Sala Polifunzionale").email(SALA_ALTRA).build()
         ));
 
-        prenotazioniService = new PrenotazioniService(graphClient, saleService, appConfig, executor);
+        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor);
     }
 
     private Jwt createAdminJwt() {
@@ -108,10 +107,7 @@ public class BusinessHoursAndOverlapUnitTest {
         void testOverlap_IdenticalSlot_ThrowsConflictException() {
             // Esistente: 2026-11-10 10:00 -> 11:00
             Event existingEvent = createGraphEvent("evt-1", "2026-11-10T10:00:00", "2026-11-10T11:00:00");
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(existingEvent));
-
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(List.of(existingEvent));
 
             // Richiesta: 2026-11-10 10:00 -> 11:00
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
@@ -133,10 +129,7 @@ public class BusinessHoursAndOverlapUnitTest {
         void testOverlap_NewStartsBeforeAndEndsDuringExisting_ThrowsConflictException() {
             // Esistente: 2026-11-10 10:00 -> 12:00
             Event existingEvent = createGraphEvent("evt-1", "2026-11-10T10:00:00", "2026-11-10T12:00:00");
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(existingEvent));
-
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(List.of(existingEvent));
 
             // Richiesta: 09:30 -> 10:30
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
@@ -158,10 +151,7 @@ public class BusinessHoursAndOverlapUnitTest {
         void testOverlap_NewStartsDuringAndEndsAfterExisting_ThrowsConflictException() {
             // Esistente: 2026-11-10 10:00 -> 12:00
             Event existingEvent = createGraphEvent("evt-1", "2026-11-10T10:00:00", "2026-11-10T12:00:00");
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(existingEvent));
-
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(List.of(existingEvent));
 
             // Richiesta: 11:30 -> 12:30
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
@@ -183,10 +173,7 @@ public class BusinessHoursAndOverlapUnitTest {
         void testOverlap_NewCompletelyEnclosesExisting_ThrowsConflictException() {
             // Esistente: 2026-11-10 10:30 -> 11:00
             Event existingEvent = createGraphEvent("evt-1", "2026-11-10T10:30:00", "2026-11-10T11:00:00");
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(existingEvent));
-
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(List.of(existingEvent));
 
             // Richiesta: 10:00 -> 12:00 (comprende l'intero evento esistente)
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
@@ -208,10 +195,7 @@ public class BusinessHoursAndOverlapUnitTest {
         void testOverlap_ExistingCompletelyEnclosesNew_ThrowsConflictException() {
             // Esistente: 2026-11-10 09:00 -> 13:00
             Event existingEvent = createGraphEvent("evt-1", "2026-11-10T09:00:00", "2026-11-10T13:00:00");
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(existingEvent));
-
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(List.of(existingEvent));
 
             // Richiesta: 10:00 -> 11:00 (interna a 09:00-13:00)
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
@@ -233,13 +217,10 @@ public class BusinessHoursAndOverlapUnitTest {
         void testNonOverlap_AdjacentSlotBefore_Allowed() {
             // Esistente: 2026-11-10 10:00 -> 11:00
             Event existingEvent = createGraphEvent("evt-1", "2026-11-10T10:00:00", "2026-11-10T11:00:00");
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(existingEvent));
-
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(List.of(existingEvent));
 
             Event createdMock = createGraphEvent("evt-new", "2026-11-10T09:00:00", "2026-11-10T10:00:00");
-            when(graphClient.users().byUserId(SALA_TEST).calendar().events().post(any())).thenReturn(createdMock);
+            when(calendarGateway.creaEvento(eq(SALA_TEST), any())).thenReturn(createdMock);
 
             // Richiesta: 09:00 -> 10:00 (fine = inizio evento esistente)
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
@@ -259,13 +240,10 @@ public class BusinessHoursAndOverlapUnitTest {
         void testNonOverlap_AdjacentSlotAfter_Allowed() {
             // Esistente: 2026-11-10 10:00 -> 11:00
             Event existingEvent = createGraphEvent("evt-1", "2026-11-10T10:00:00", "2026-11-10T11:00:00");
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(existingEvent));
-
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(List.of(existingEvent));
 
             Event createdMock = createGraphEvent("evt-new-after", "2026-11-10T11:00:00", "2026-11-10T12:00:00");
-            when(graphClient.users().byUserId(SALA_TEST).calendar().events().post(any())).thenReturn(createdMock);
+            when(calendarGateway.creaEvento(eq(SALA_TEST), any())).thenReturn(createdMock);
 
             // Richiesta: 11:00 -> 12:00 (inizio = fine evento esistente)
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
@@ -284,12 +262,10 @@ public class BusinessHoursAndOverlapUnitTest {
         @DisplayName("Dovrebbe consentire prenotazioni contemporanee se effettuate su sale differenti")
         void testNonOverlap_SameTimeDifferentRoom_Allowed() {
             // Sala 2 non ha eventi
-            EventCollectionResponse emptyResponse = new EventCollectionResponse();
-            emptyResponse.setValue(Collections.emptyList());
-            when(graphClient.users().byUserId(SALA_ALTRA).calendarView().get(any())).thenReturn(emptyResponse);
+            when(calendarGateway.getEventi(eq(SALA_ALTRA), any(), any())).thenReturn(Collections.emptyList());
 
             Event createdMock = createGraphEvent("evt-sala2", "2026-11-10T10:00:00", "2026-11-10T11:00:00");
-            when(graphClient.users().byUserId(SALA_ALTRA).calendar().events().post(any())).thenReturn(createdMock);
+            when(calendarGateway.creaEvento(eq(SALA_ALTRA), any())).thenReturn(createdMock);
 
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
                     .salaEmail(SALA_ALTRA)
@@ -308,10 +284,7 @@ public class BusinessHoursAndOverlapUnitTest {
         void testOverlap_RecurringDailySeriesCollidesWithExistingSingleEvent() {
             // Esistente singolo mercoledì 2026-11-04 10:00 -> 11:00
             Event existingEvent = createGraphEvent("evt-wed", "2026-11-04T10:00:00", "2026-11-04T11:00:00");
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(existingEvent));
-
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(List.of(existingEvent));
 
             // Richiesta: serie daily da lunedì 2026-11-02 a venerdì 2026-11-06 (orario 10:00-11:00)
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
@@ -336,14 +309,11 @@ public class BusinessHoursAndOverlapUnitTest {
         void testOverlap_SelfExclusionWhenModifyingSameSlot() {
             // L'evento 'evt-123' esiste già nello stesso slot
             Event existingEvent = createGraphEvent("evt-123", "2026-11-10T10:00:00", "2026-11-10T11:00:00");
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(existingEvent));
-
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(List.of(existingEvent));
 
             Event patchedMock = createGraphEvent("evt-123", "2026-11-10T10:00:00", "2026-11-10T11:00:00");
             patchedMock.setSubject("Titolo Aggiornato");
-            when(graphClient.users().byUserId(SALA_TEST).events().byEventId("evt-123").patch(any())).thenReturn(patchedMock);
+            when(calendarGateway.aggiornaEvento(eq(SALA_TEST), eq("evt-123"), any())).thenReturn(patchedMock);
 
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
                     .salaEmail(SALA_TEST)
@@ -365,23 +335,19 @@ public class BusinessHoursAndOverlapUnitTest {
 
         @BeforeEach
         void setUpBusinessHoursMocks() {
-            EventCollectionResponse empty = new EventCollectionResponse();
-            empty.setValue(Collections.emptyList());
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(empty);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(Collections.emptyList());
 
             Event mockCreated = createGraphEvent("evt-mock-created", "2026-11-10T08:00:00", "2026-11-10T09:00:00");
-            when(graphClient.users().byUserId(SALA_TEST).calendar().events().post(any())).thenReturn(mockCreated);
+            when(calendarGateway.creaEvento(eq(SALA_TEST), any())).thenReturn(mockCreated);
         }
 
         @Test
         @DisplayName("Dovrebbe consentire prenotazioni perfettamente all'interno della fascia oraria consentita (08:00 - 20:00)")
         void testBusinessHours_ValidSlotAtBoundary_0800To2000_Allowed() {
-            EventCollectionResponse empty = new EventCollectionResponse();
-            empty.setValue(Collections.emptyList());
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(empty);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(Collections.emptyList());
 
             Event mockEvt1 = createGraphEvent("evt-mattina", "2026-11-10T08:00:00", "2026-11-10T09:00:00");
-            when(graphClient.users().byUserId(SALA_TEST).calendar().events().post(any())).thenReturn(mockEvt1);
+            when(calendarGateway.creaEvento(eq(SALA_TEST), any())).thenReturn(mockEvt1);
 
             // 08:00 -> 09:00 (limite inferiore consentito)
             PrenotazioneRequestDTO reqMattina = PrenotazioneRequestDTO.builder()
@@ -395,7 +361,7 @@ public class BusinessHoursAndOverlapUnitTest {
             assertThat(res1).isNotNull();
 
             Event mockEvt2 = createGraphEvent("evt-sera", "2026-11-10T19:00:00", "2026-11-10T20:00:00");
-            when(graphClient.users().byUserId(SALA_TEST).calendar().events().post(any())).thenReturn(mockEvt2);
+            when(calendarGateway.creaEvento(eq(SALA_TEST), any())).thenReturn(mockEvt2);
 
             // 19:00 -> 20:00 (limite superiore consentito)
             PrenotazioneRequestDTO reqSera = PrenotazioneRequestDTO.builder()
@@ -538,12 +504,10 @@ public class BusinessHoursAndOverlapUnitTest {
         @Test
         @DisplayName("Dovrebbe impostare esplicitamente la timezone 'Europe/Rome' nell'evento Microsoft Graph creato")
         void testTimezone_GraphEventConfiguredWithEuropeRomeTimezone() {
-            EventCollectionResponse empty = new EventCollectionResponse();
-            empty.setValue(Collections.emptyList());
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(empty);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(Collections.emptyList());
 
             Event mockCreated = createGraphEvent("evt-tz-check", "2026-11-10T09:00:00", "2026-11-10T10:00:00");
-            when(graphClient.users().byUserId(SALA_TEST).calendar().events().post(any())).thenReturn(mockCreated);
+            when(calendarGateway.creaEvento(eq(SALA_TEST), any())).thenReturn(mockCreated);
 
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
                     .salaEmail(SALA_TEST)
@@ -555,7 +519,7 @@ public class BusinessHoursAndOverlapUnitTest {
             prenotazioniService.creaPrenotazione(request, createAdminJwt());
 
             ArgumentCaptor<Event> eventCaptor = ArgumentCaptor.forClass(Event.class);
-            verify(graphClient.users().byUserId(SALA_TEST).calendar().events()).post(eventCaptor.capture());
+            verify(calendarGateway).creaEvento(eq(SALA_TEST), eventCaptor.capture());
 
             Event captured = eventCaptor.getValue();
             assertThat(captured).isNotNull();
@@ -568,9 +532,7 @@ public class BusinessHoursAndOverlapUnitTest {
         @Test
         @DisplayName("Dovrebbe consentire timestamp UTC validi (con 'Z') o con offset nei filtri temporali di getPrenotazioni")
         void testTimezone_UtcAndOffsetAllowedInGetPrenotazioniFilters() {
-            EventCollectionResponse empty = new EventCollectionResponse();
-            empty.setValue(Collections.emptyList());
-            when(graphClient.users().byUserId(SALA_TEST).calendarView().get(any())).thenReturn(empty);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(Collections.emptyList());
 
             // Con suffisso UTC 'Z'
             List<PrenotazioneDTO> resUtc = prenotazioniService.getPrenotazioni(

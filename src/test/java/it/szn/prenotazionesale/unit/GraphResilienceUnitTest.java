@@ -2,10 +2,10 @@ package it.szn.prenotazionesale.unit;
 
 import com.microsoft.graph.models.DateTimeTimeZone;
 import com.microsoft.graph.models.Event;
-import com.microsoft.graph.models.EventCollectionResponse;
 import com.microsoft.graph.models.Room;
 import com.microsoft.graph.models.RoomCollectionResponse;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
+import it.szn.prenotazionesale.graph.GraphCalendarGateway;
 import com.microsoft.kiota.ApiException;
 import com.microsoft.kiota.ResponseHeaders;
 import it.szn.prenotazionesale.config.AppConfig;
@@ -55,8 +55,8 @@ import static org.mockito.Mockito.*;
 @org.mockito.junit.jupiter.MockitoSettings(strictness = org.mockito.quality.Strictness.LENIENT)
 public class GraphResilienceUnitTest {
 
-    @Mock(answer = org.mockito.Answers.RETURNS_DEEP_STUBS)
-    private GraphServiceClient graphClient;
+    @Mock
+    private GraphCalendarGateway calendarGateway;
 
     @Mock
     private SaleService saleService;
@@ -94,7 +94,7 @@ public class GraphResilienceUnitTest {
                 SalaDTO.builder().id(SALA_2).nome("Sala 2").email(SALA_2).build()
         ));
 
-        prenotazioniService = new PrenotazioniService(graphClient, saleService, appConfig, executor);
+        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor);
         exceptionHandler = new GlobalExceptionHandler();
     }
 
@@ -222,12 +222,10 @@ public class GraphResilienceUnitTest {
         @Test
         @DisplayName("In caso di SocketTimeoutException su post evento, il lock di sala deve essere rilasciato in finally")
         void testNetworkTimeout_SocketTimeoutException_UnlocksLockAndPropagates() {
-            EventCollectionResponse empty = new EventCollectionResponse();
-            empty.setValue(Collections.emptyList());
-            when(graphClient.users().byUserId(SALA_1).calendarView().get(any())).thenReturn(empty);
+            when(calendarGateway.getEventi(eq(SALA_1), any(), any())).thenReturn(Collections.emptyList());
 
             // Simula SocketTimeoutException durante la chiamata HTTP di scrittura
-            when(graphClient.users().byUserId(SALA_1).calendar().events().post(any()))
+            when(calendarGateway.creaEvento(eq(SALA_1), any()))
                     .thenThrow(new RuntimeException(new SocketTimeoutException("Read timed out after 15000ms")));
 
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
@@ -247,8 +245,7 @@ public class GraphResilienceUnitTest {
             // o fallirebbe con IllegalStateException("Timeout acquisizione lock").
             // Ora simuliamo che Graph sia di nuovo operativo:
             Event successEvent = createGraphEvent("evt-success-after-timeout", "2026-11-10T09:00:00", "2026-11-10T10:00:00");
-            var eventsBuilder = graphClient.users().byUserId(SALA_1).calendar().events();
-            doReturn(successEvent).when(eventsBuilder).post(any());
+            doReturn(successEvent).when(calendarGateway).creaEvento(eq(SALA_1), any());
 
             assertDoesNotThrow(() -> {
                 prenotazioniService.creaPrenotazione(request, createAdminJwt());
@@ -292,18 +289,15 @@ public class GraphResilienceUnitTest {
         @DisplayName("Durante cambio sala, se la cancellazione della sala precedente fallisce, deve eseguire rollback sulla nuova sala")
         void testRoomMigration_CompensatingRollbackWhenOldDeleteFails() {
             // Nessun evento preesistente su SALA_2
-            EventCollectionResponse empty = new EventCollectionResponse();
-            empty.setValue(Collections.emptyList());
-            when(graphClient.users().byUserId(SALA_2).calendarView().get(any())).thenReturn(empty);
+            when(calendarGateway.getEventi(eq(SALA_2), any(), any())).thenReturn(Collections.emptyList());
 
             // Creazione sulla nuova sala (SALA_2) riesce
             Event createdOnSala2 = createGraphEvent("new-evt-sala2", "2026-11-10T09:00:00", "2026-11-10T10:00:00");
-            when(graphClient.users().byUserId(SALA_2).calendar().events().post(any())).thenReturn(createdOnSala2);
+            when(calendarGateway.creaEvento(eq(SALA_2), any())).thenReturn(createdOnSala2);
 
             // Cancellazione sulla vecchia sala (SALA_1) fallisce con errore 500
-            var oldEventReq = graphClient.users().byUserId(SALA_1).events().byEventId("old-evt-1");
             doThrow(new TestApiException(500, "Remote delete error on Exchange", null))
-                    .when(oldEventReq).delete();
+                    .when(calendarGateway).eliminaEvento(eq(SALA_1), eq("old-evt-1"));
 
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
                     .salaEmail(SALA_2)
@@ -321,29 +315,25 @@ public class GraphResilienceUnitTest {
 
             // VERIFICA DEL ROLLBACK COMPENSATIVO:
             // Il nuovo evento creato su SALA_2 deve essere stato cancellato per evitare duplicazioni di prenotazione
-            verify(graphClient.users().byUserId(SALA_2).events().byEventId("new-evt-sala2")).delete();
+            verify(calendarGateway).eliminaEvento(eq(SALA_2), eq("new-evt-sala2"));
         }
 
         @Test
         @DisplayName("Durante cambio sala, se anche il rollback compensativo fallisce, deve loggare incidente e sbloccare entrambi i lock")
         void testRoomMigration_FailureWhenCompensatingRollbackAlsoFails() {
-            EventCollectionResponse empty = new EventCollectionResponse();
-            empty.setValue(Collections.emptyList());
-            when(graphClient.users().byUserId(SALA_2).calendarView().get(any())).thenReturn(empty);
-            when(graphClient.users().byUserId(SALA_1).calendarView().get(any())).thenReturn(empty);
+            when(calendarGateway.getEventi(eq(SALA_2), any(), any())).thenReturn(Collections.emptyList());
+            when(calendarGateway.getEventi(eq(SALA_1), any(), any())).thenReturn(Collections.emptyList());
 
             Event createdOnSala2 = createGraphEvent("new-evt-sala2", "2026-11-10T09:00:00", "2026-11-10T10:00:00");
-            when(graphClient.users().byUserId(SALA_2).calendar().events().post(any())).thenReturn(createdOnSala2);
+            when(calendarGateway.creaEvento(eq(SALA_2), any())).thenReturn(createdOnSala2);
 
             // Cancellazione vecchia sala fallisce
-            var oldEventReq = graphClient.users().byUserId(SALA_1).events().byEventId("old-evt-1");
             doThrow(new RuntimeException("Delete failed on SALA_1"))
-                    .when(oldEventReq).delete();
+                    .when(calendarGateway).eliminaEvento(eq(SALA_1), eq("old-evt-1"));
 
             // E anche il rollback su SALA_2 fallisce!
-            var rollbackEventReq = graphClient.users().byUserId(SALA_2).events().byEventId("new-evt-sala2");
             doThrow(new RuntimeException("Rollback delete failed on SALA_2"))
-                    .when(rollbackEventReq).delete();
+                    .when(calendarGateway).eliminaEvento(eq(SALA_2), eq("new-evt-sala2"));
 
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
                     .salaEmail(SALA_2)
@@ -361,8 +351,7 @@ public class GraphResilienceUnitTest {
             // Verifica che i lock di entrambe le sale siano stati rilasciati (nessun deadlock)
             // Una nuova prenotazione successiva su SALA_1 o SALA_2 deve poter acquisire i lock
             Event newSuccessEvent = createGraphEvent("evt-success", "2026-11-10T14:00:00", "2026-11-10T15:00:00");
-            var eventsReq = graphClient.users().byUserId(SALA_1).calendar().events();
-            doReturn(newSuccessEvent).when(eventsReq).post(any());
+            doReturn(newSuccessEvent).when(calendarGateway).creaEvento(eq(SALA_1), any());
 
             PrenotazioneRequestDTO nextRequest = PrenotazioneRequestDTO.builder()
                     .salaEmail(SALA_1)

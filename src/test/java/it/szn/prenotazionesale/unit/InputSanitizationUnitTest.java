@@ -1,7 +1,7 @@
 package it.szn.prenotazionesale.unit;
 
 import com.microsoft.graph.models.*;
-import com.microsoft.graph.serviceclient.GraphServiceClient;
+import it.szn.prenotazionesale.graph.GraphCalendarGateway;
 import it.szn.prenotazionesale.config.AppConfig;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
@@ -40,8 +40,8 @@ import static org.mockito.Mockito.*;
 @org.mockito.junit.jupiter.MockitoSettings(strictness = org.mockito.quality.Strictness.LENIENT)
 public class InputSanitizationUnitTest {
 
-    @Mock(answer = org.mockito.Answers.RETURNS_DEEP_STUBS)
-    private GraphServiceClient graphClient;
+    @Mock
+    private GraphCalendarGateway calendarGateway;
 
     @Mock
     private SaleService saleService;
@@ -66,7 +66,7 @@ public class InputSanitizationUnitTest {
                 SalaDTO.builder().id(SALA_VALIDA).nome("Sala Dohrn").email(SALA_VALIDA).build()
         ));
 
-        prenotazioniService = new PrenotazioniService(graphClient, saleService, appConfig, executor);
+        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor);
     }
 
     private Jwt createAdminJwt() {
@@ -136,9 +136,7 @@ public class InputSanitizationUnitTest {
         @Test
         @DisplayName("Dovrebbe accettare date valide in formato ISO-8601 standard senza sollevare eccezioni")
         void testODataInjection_ValidIsoDates_Accepted() {
-            EventCollectionResponse empty = new EventCollectionResponse();
-            empty.setValue(Collections.emptyList());
-            when(graphClient.users().byUserId(SALA_VALIDA).calendarView().get(any())).thenReturn(empty);
+            when(calendarGateway.getEventi(eq(SALA_VALIDA), any(), any())).thenReturn(Collections.emptyList());
 
             assertDoesNotThrow(() ->
                     prenotazioniService.getPrenotazioni(SALA_VALIDA, "2026-11-10T08:00:00", "2026-11-10T18:00:00", createAdminJwt())
@@ -167,7 +165,7 @@ public class InputSanitizationUnitTest {
             // iCalUId contaminato con OData Injection
             mockEvent.setICalUId("validPrefix' or 1 eq 1 or '");
 
-            when(graphClient.users().byUserId(SALA_VALIDA).events().byEventId("evt-malicious-uid").get(any()))
+            when(calendarGateway.getEvento(eq(SALA_VALIDA), eq("evt-malicious-uid"), any(String[].class)))
                     .thenReturn(mockEvent);
 
             // Esegue cancellazione
@@ -175,10 +173,10 @@ public class InputSanitizationUnitTest {
 
             // Verifica che il filtro verso la casella dell'organizzatore NON sia MAI stato chiamato
             // grazie al blocco preventivo di PATTERN_ICALUID_SICURO
-            verify(graphClient.users().byUserId("organizzatore.esterno@szn.it").events(), never()).get(any());
+            verify(calendarGateway, never()).cercaEventiPerFiltro(anyString(), anyString());
 
             // Ma la cancellazione diretta sulla sala deve essere stata eseguita
-            verify(graphClient.users().byUserId(SALA_VALIDA).events().byEventId("evt-malicious-uid")).delete();
+            verify(calendarGateway).eliminaEvento(eq(SALA_VALIDA), eq("evt-malicious-uid"));
         }
 
         @Test
@@ -195,13 +193,13 @@ public class InputSanitizationUnitTest {
             mockEvent.setOrganizer(orgRecipient);
             mockEvent.setICalUId("<script>alert('xss')</script>");
 
-            when(graphClient.users().byUserId(SALA_VALIDA).events().byEventId("evt-xss-uid").get(any()))
+            when(calendarGateway.getEvento(eq(SALA_VALIDA), eq("evt-xss-uid"), any(String[].class)))
                     .thenReturn(mockEvent);
 
             prenotazioniService.cancellaPrenotazione("evt-xss-uid", SALA_VALIDA, "SERIE", null, createAdminJwt());
 
-            verify(graphClient.users().byUserId("organizzatore.esterno@szn.it").events(), never()).get(any());
-            verify(graphClient.users().byUserId(SALA_VALIDA).events().byEventId("evt-xss-uid")).delete();
+            verify(calendarGateway, never()).cercaEventiPerFiltro(anyString(), anyString());
+            verify(calendarGateway).eliminaEvento(eq(SALA_VALIDA), eq("evt-xss-uid"));
         }
 
         @Test
@@ -220,24 +218,21 @@ public class InputSanitizationUnitTest {
             String validUid = "040000008200E00074C5B7101A82E00800000000E07137D024B1D601000000000000000010000000455B1DEB6DBA414EB6056554F85DF2B5";
             mockEvent.setICalUId(validUid);
 
-            when(graphClient.users().byUserId(SALA_VALIDA).events().byEventId("evt-legit-uid").get(any()))
+            when(calendarGateway.getEvento(eq(SALA_VALIDA), eq("evt-legit-uid"), any(String[].class)))
                     .thenReturn(mockEvent);
 
             Event orgMatchingEvent = new Event();
             orgMatchingEvent.setId("org-evt-1");
             orgMatchingEvent.setICalUId(validUid);
 
-            EventCollectionResponse orgResponse = new EventCollectionResponse();
-            orgResponse.setValue(List.of(orgMatchingEvent));
-
-            when(graphClient.users().byUserId("organizzatore.esterno@szn.it").events().get(any()))
-                    .thenReturn(orgResponse);
+            when(calendarGateway.cercaEventiPerFiltro(eq("organizzatore.esterno@szn.it"), any()))
+                    .thenReturn(List.of(orgMatchingEvent));
 
             prenotazioniService.cancellaPrenotazione("evt-legit-uid", SALA_VALIDA, "SERIE", null, createAdminJwt());
 
             // Con UID valido, la cancellazione dell'evento sul calendario dell'organizzatore DEVE essere eseguita
-            verify(graphClient.users().byUserId("organizzatore.esterno@szn.it").events().byEventId("org-evt-1")).delete();
-            verify(graphClient.users().byUserId(SALA_VALIDA).events().byEventId("evt-legit-uid")).delete();
+            verify(calendarGateway).eliminaEvento("organizzatore.esterno@szn.it", "org-evt-1");
+            verify(calendarGateway).eliminaEvento(SALA_VALIDA, "evt-legit-uid");
         }
     }
 
@@ -296,10 +291,7 @@ public class InputSanitizationUnitTest {
             body.setContent("<p>Descrizione di prova con <b>grassetto</b>.<script>alert('XSS')</script></p>");
             event.setBody(body);
 
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(event));
-
-            when(graphClient.users().byUserId(SALA_VALIDA).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_VALIDA), any(), any())).thenReturn(List.of(event));
 
             List<PrenotazioneDTO> result = prenotazioniService.getPrenotazioni(
                     SALA_VALIDA, "2026-11-10T08:00:00", "2026-11-10T18:00:00", createAdminJwt()
@@ -329,10 +321,7 @@ public class InputSanitizationUnitTest {
             body.setContent("Note riunione: <img src='x' onerror='alert(document.domain)'> completate.");
             event.setBody(body);
 
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(event));
-
-            when(graphClient.users().byUserId(SALA_VALIDA).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_VALIDA), any(), any())).thenReturn(List.of(event));
 
             List<PrenotazioneDTO> result = prenotazioniService.getPrenotazioni(
                     SALA_VALIDA, "2026-11-10T08:00:00", "2026-11-10T18:00:00", createAdminJwt()
@@ -355,10 +344,7 @@ public class InputSanitizationUnitTest {
             body.setContent("Ricerca &amp; Sviluppo &quot;SZN&quot; &#39;Napoli&#39;&nbsp;2026");
             event.setBody(body);
 
-            EventCollectionResponse response = new EventCollectionResponse();
-            response.setValue(List.of(event));
-
-            when(graphClient.users().byUserId(SALA_VALIDA).calendarView().get(any())).thenReturn(response);
+            when(calendarGateway.getEventi(eq(SALA_VALIDA), any(), any())).thenReturn(List.of(event));
 
             List<PrenotazioneDTO> result = prenotazioniService.getPrenotazioni(
                     SALA_VALIDA, "2026-11-10T08:00:00", "2026-11-10T18:00:00", createAdminJwt()
