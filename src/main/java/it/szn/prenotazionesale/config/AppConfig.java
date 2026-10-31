@@ -19,7 +19,9 @@ public class AppConfig {
 
     @Data
     public static class Security {
-        private String trustedProxies = "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
+        public static final String DEFAULT_TRUSTED_PROXIES =
+                "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
+        private String trustedProxies = DEFAULT_TRUSTED_PROXIES;
     }
 
     @Data

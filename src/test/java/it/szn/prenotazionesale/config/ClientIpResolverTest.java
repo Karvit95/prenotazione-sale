@@ -162,5 +162,124 @@ class ClientIpResolverTest {
         assertFalse(resolver.isTrustedProxy(null));
         assertFalse(resolver.isTrustedProxy("not-an-ip"));
     }
+
+    @Test
+    @DisplayName("Supporto porta IPv4 in XFF: 203.0.113.9:51234 risolto come 203.0.113.9")
+    void testResolve_Ipv4WithPort_StripsPort() {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setRemoteAddr("10.0.0.5");
+        request.addHeader("X-Forwarded-For", "203.0.113.9:51234");
+
+        assertEquals("203.0.113.9", resolver.resolve(request));
+    }
+
+    @Test
+    @DisplayName("Supporto porta IPv6 tra parentesi quadre in XFF: [2001:db8::1]:443 risolto come 2001:db8::1")
+    void testResolve_Ipv6WithPort_StripsPortAndBrackets() {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setRemoteAddr("10.0.0.5");
+        request.addHeader("X-Forwarded-For", "[2001:db8::1]:443");
+
+        assertEquals("2001:db8::1", resolver.resolve(request));
+    }
+
+    @Test
+    @DisplayName("Supporto porte multiple in catena XFF: 9.9.9.9:80, 203.0.113.9:51234 risolto con token più a destra")
+    void testResolve_MultipleHopsWithPorts_ReturnsRightmostClient() {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setRemoteAddr("10.0.0.5");
+        request.addHeader("X-Forwarded-For", "9.9.9.9:80, 203.0.113.9:51234");
+
+        assertEquals("203.0.113.9", resolver.resolve(request));
+    }
+
+    @Test
+    @DisplayName("Hop fidato con porta in XFF viene scartato: 10.0.0.7:1234, 203.0.113.9:51234")
+    void testResolve_TrustedHopWithPort_DiscardedAndReturnsClient() {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setRemoteAddr("10.0.0.5");
+        // Scansione da destra: 203.0.113.9:51234 è non fidato e viene restituito
+        request.addHeader("X-Forwarded-For", "10.0.0.7:1234, 203.0.113.9:51234");
+
+        assertEquals("203.0.113.9", resolver.resolve(request));
+
+        // Se l'hop fidato è a destra del client: 203.0.113.9:51234, 10.0.0.7:1234
+        MockHttpServletRequest request2 = new MockHttpServletRequest();
+        request2.setRemoteAddr("10.0.0.5");
+        request2.addHeader("X-Forwarded-For", "203.0.113.9:51234, 10.0.0.7:1234");
+
+        assertEquals("203.0.113.9", resolver.resolve(request2));
+    }
+
+    @Test
+    @DisplayName("Porta non valida in XFF (valore non numerico, vuota o fuori intervallo 0-65535) effettua fail-safe su remoteAddr")
+    void testResolve_InvalidPort_FailsSafeToRemoteAddr() {
+        MockHttpServletRequest requestOutOfRange = new MockHttpServletRequest();
+        requestOutOfRange.setRemoteAddr("10.0.0.5");
+        requestOutOfRange.addHeader("X-Forwarded-For", "1.2.3.4:99999");
+        assertEquals("10.0.0.5", resolver.resolve(requestOutOfRange));
+
+        MockHttpServletRequest requestAlphaPort = new MockHttpServletRequest();
+        requestAlphaPort.setRemoteAddr("10.0.0.5");
+        requestAlphaPort.addHeader("X-Forwarded-For", "1.2.3.4:abc");
+        assertEquals("10.0.0.5", resolver.resolve(requestAlphaPort));
+
+        MockHttpServletRequest requestEmptyPort = new MockHttpServletRequest();
+        requestEmptyPort.setRemoteAddr("10.0.0.5");
+        requestEmptyPort.addHeader("X-Forwarded-For", "1.2.3.4:");
+        assertEquals("10.0.0.5", resolver.resolve(requestEmptyPort));
+    }
+
+    @Test
+    @DisplayName("IPv6 senza parentesi quadre con più ':' non viene interpretato come indirizzo:porta")
+    void testResolve_Ipv6WithoutBrackets_NotTreatedAsPort() {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setRemoteAddr("10.0.0.5");
+        request.addHeader("X-Forwarded-For", "2001:db8::1");
+
+        assertEquals("2001:db8::1", resolver.resolve(request));
+    }
+
+    @Test
+    @DisplayName("Configurazione personalizzata trusted-proxies: verifica restrizione a subnet specifica")
+    void testCustomTrustedProxiesConfiguration() {
+        AppConfig customConfig = new AppConfig();
+        customConfig.getSecurity().setTrustedProxies("10.1.0.0/16");
+        ClientIpResolver customResolver = new ClientIpResolver(customConfig);
+
+        // 10.0.0.5 come remoteAddr NON è più un proxy fidato: XFF viene ignorato
+        MockHttpServletRequest untrustedRemote = new MockHttpServletRequest();
+        untrustedRemote.setRemoteAddr("10.0.0.5");
+        untrustedRemote.addHeader("X-Forwarded-For", "203.0.113.9");
+        assertEquals("10.0.0.5", customResolver.resolve(untrustedRemote));
+
+        // 10.1.2.3 come remoteAddr è fidato: XFF viene analizzato
+        MockHttpServletRequest trustedRemote = new MockHttpServletRequest();
+        trustedRemote.setRemoteAddr("10.1.2.3");
+        trustedRemote.addHeader("X-Forwarded-For", "203.0.113.9");
+        assertEquals("203.0.113.9", customResolver.resolve(trustedRemote));
+    }
+
+    @Test
+    @DisplayName("CIDR non valido nella configurazione viene scartato con warn senza compromettere gli altri CIDR validi")
+    void testInvalidCidrInConfiguration_IgnoredGracefully() {
+        AppConfig configWithInvalidCidr = new AppConfig();
+        configWithInvalidCidr.getSecurity().setTrustedProxies("10.1.0.0/99,192.168.0.0/16");
+        ClientIpResolver resilientResolver = new ClientIpResolver(configWithInvalidCidr);
+
+        // 10.1.0.1 non è fidato perché il suo CIDR (/99) era malformato
+        assertFalse(resilientResolver.isTrustedProxy("10.1.0.1"));
+
+        // 192.168.1.1 rimane fidato perché il suo CIDR è valido
+        assertTrue(resilientResolver.isTrustedProxy("192.168.1.1"));
+    }
+
+    @Test
+    @DisplayName("IPv4-mapped IPv6 (::ffff:10.0.0.5) riconosciuto correttamente come proxy fidato")
+    void testIsTrustedProxy_Ipv4MappedIpv6() {
+        assertTrue(resolver.isTrustedProxy("::ffff:10.0.0.5"));
+        assertTrue(resolver.isTrustedProxy("::ffff:127.0.0.1"));
+        assertFalse(resolver.isTrustedProxy("::ffff:203.0.113.5"));
+    }
 }
 

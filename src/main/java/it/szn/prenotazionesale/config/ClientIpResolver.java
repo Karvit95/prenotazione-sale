@@ -1,6 +1,5 @@
 package it.szn.prenotazionesale.config;
 
-import jakarta.annotation.PostConstruct;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,10 +18,11 @@ import java.util.List;
  * 1. Se remoteAddr non proviene da un reverse proxy fidato (definito da CIDR in AppConfig),
  *    l'header XFF viene completamente ignorato e viene restituito remoteAddr.
  * 2. Se remoteAddr è un proxy fidato, si analizza la catena XFF scorrendo da DESTRA verso SINISTRA.
+ *    Ogni token viene prima normalizzato rimuovendo l'eventuale porta (es. a.b.c.d:port o [IPv6]:port).
  *    Ogni hop intermedio fidato viene scartato; il primo IP letterale valido NON fidato
- *    rappresenta il client reale.
- * 3. Se la catena contiene token non-IP (possibili injection o hostname non risolti) o supera
- *    il limite massimo di sicurezza (2048 caratteri), la risoluzione si interrompe e
+ *    rappresenta il client reale (restituito senza porta).
+ * 3. Se la catena contiene token non-IP, porte non conformi (valori non numerici o fuori dal range 0-65535)
+ *    o supera il limite massimo di sicurezza (2048 caratteri), la risoluzione si interrompe e
  *    restituisce remoteAddr (fail-safe).
  * 4. La validazione dei letterali IP (IPv4 e IPv6) e il matching CIDR sono eseguiti senza
  *    librerie esterne e senza risoluzione DNS.
@@ -31,8 +31,6 @@ import java.util.List;
 @Component
 public class ClientIpResolver {
 
-    private static final String DEFAULT_TRUSTED_PROXIES =
-            "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
     private static final int MAX_XFF_LENGTH = 2048;
     public static final String UNKNOWN_IP = "UNKNOWN";
 
@@ -49,14 +47,13 @@ public class ClientIpResolver {
         this(null);
     }
 
-    @PostConstruct
-    public void initMatchers() {
+    private void initMatchers() {
         String configuredProxies = null;
         if (appConfig != null && appConfig.getSecurity() != null) {
             configuredProxies = appConfig.getSecurity().getTrustedProxies();
         }
         if (configuredProxies == null || configuredProxies.isBlank()) {
-            configuredProxies = DEFAULT_TRUSTED_PROXIES;
+            configuredProxies = AppConfig.Security.DEFAULT_TRUSTED_PROXIES;
         }
 
         List<CidrMatcher> parsed = new ArrayList<>();
@@ -73,14 +70,16 @@ public class ClientIpResolver {
             }
         }
         this.matchers = Collections.unmodifiableList(parsed);
+        log.info("Proxy fidati per risoluzione client IP: {}", configuredProxies);
     }
 
     /**
-     * Risolve l'IP del client reale applicando la verifica dei proxy fidati
-     * e la scansione sicura anti-spoofing da destra verso sinistra.
+     * Risolve l'IP del client reale applicando la verifica dei proxy fidati,
+     * la rimozione dell'eventuale porta e la scansione sicura anti-spoofing
+     * da destra verso sinistra.
      *
      * @param request richiesta HTTP (può essere null)
-     * @return IP client affidabile o "UNKNOWN" se non determinabile
+     * @return IP client affidabile senza porta o "UNKNOWN" se non determinabile
      */
     public String resolve(HttpServletRequest request) {
         if (request == null) {
@@ -132,13 +131,15 @@ public class ClientIpResolver {
                 continue;
             }
 
-            // Normalizza rimuovendo eventuali parentesi quadre attorno a IPv6 (es. [::1])
-            String cleanToken = token;
-            if (cleanToken.startsWith("[") && cleanToken.endsWith("]") && cleanToken.length() > 2) {
-                cleanToken = cleanToken.substring(1, cleanToken.length() - 1).trim();
+            // Normalizza rimuovendo l'eventuale porta (es. a.b.c.d:port o [IPv6]:port)
+            String cleanIp = stripPort(token);
+            if (cleanIp == null) {
+                log.warn("Token non valido o porta non conforme in X-Forwarded-For: '{}'. Interruzione catena e fallback su remoteAddr: {}",
+                        token, remoteAddr);
+                return remoteAddr;
             }
 
-            byte[] ipBytes = parseIpToBytes(cleanToken);
+            byte[] ipBytes = parseIpToBytes(cleanIp);
             if (ipBytes == null) {
                 log.warn("Token non valido come letterale IP in X-Forwarded-For: '{}'. Interruzione catena e fallback su remoteAddr: {}",
                         token, remoteAddr);
@@ -150,12 +151,105 @@ public class ClientIpResolver {
                 continue;
             }
 
-            // Primo IP valido e non fidato trovato da destra: è il client reale
-            return cleanToken;
+            // Primo IP valido e non fidato trovato da destra: è il client reale (senza porta)
+            return cleanIp;
         }
 
         // Tutti gli hop nella catena erano proxy fidati
         return remoteAddr;
+    }
+
+    /**
+     * Rimuove l'eventuale porta da un token XFF.
+     * <ul>
+     *   <li>[IPv6]:porta &rarr; IPv6</li>
+     *   <li>[IPv6] &rarr; IPv6</li>
+     *   <li>a.b.c.d:porta &rarr; a.b.c.d (solo se contiene un solo colon e a.b.c.d è un IPv4 valido)</li>
+     *   <li>La porta deve essere composta da 1-5 cifre nel range 0-65535, altrimenti restituisce null</li>
+     *   <li>Un IPv6 senza parentesi (più di un colon) non viene mai interpretato come indirizzo:porta</li>
+     * </ul>
+     *
+     * @param token stringa da analizzare
+     * @return IP pulito senza porta, oppure null se il token o la porta sono malformati
+     */
+    private static String stripPort(String token) {
+        if (token == null) {
+            return null;
+        }
+        String t = token.trim();
+        if (t.isEmpty()) {
+            return null;
+        }
+
+        // Caso A: [IPv6]:porta o [IPv6]
+        if (t.startsWith("[")) {
+            int closeBracket = t.indexOf(']');
+            if (closeBracket == -1) {
+                return null;
+            }
+            String ipPart = t.substring(1, closeBracket).trim();
+            String afterBracket = t.substring(closeBracket + 1).trim();
+            if (afterBracket.isEmpty()) {
+                return ipPart;
+            }
+            if (afterBracket.startsWith(":")) {
+                String portStr = afterBracket.substring(1).trim();
+                if (!isValidPort(portStr)) {
+                    return null;
+                }
+                return ipPart;
+            }
+            return null;
+        }
+
+        // Caso B: token senza parentesi quadre
+        int colonCount = 0;
+        int colonIndex = -1;
+        for (int i = 0; i < t.length(); i++) {
+            if (t.charAt(i) == ':') {
+                colonCount++;
+                colonIndex = i;
+            }
+        }
+
+        if (colonCount == 0) {
+            // Nessun colon: IPv4 o altro valore senza porta
+            return t;
+        }
+
+        if (colonCount == 1) {
+            // Esattamente un colon: può essere solo IPv4:porta
+            String left = t.substring(0, colonIndex).trim();
+            String right = t.substring(colonIndex + 1).trim();
+            if (!isValidPort(right)) {
+                return null;
+            }
+            if (parseIpv4(left) == null) {
+                return null;
+            }
+            return left;
+        }
+
+        // Più di un colon: IPv6 senza parentesi, non va mai trattato come indirizzo:porta
+        return t;
+    }
+
+    private static boolean isValidPort(String portStr) {
+        if (portStr == null || portStr.isEmpty() || portStr.length() > 5) {
+            return false;
+        }
+        for (int i = 0; i < portStr.length(); i++) {
+            char c = portStr.charAt(i);
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        try {
+            int port = Integer.parseInt(portStr);
+            return port >= 0 && port <= 65535;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     /**
@@ -435,4 +529,3 @@ public class ClientIpResolver {
         return bytes;
     }
 }
-
