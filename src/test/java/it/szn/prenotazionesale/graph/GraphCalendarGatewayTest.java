@@ -4,6 +4,7 @@ import com.microsoft.graph.models.Event;
 import com.microsoft.graph.models.EventCollectionResponse;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
 import com.microsoft.graph.users.item.calendarview.CalendarViewRequestBuilder;
+import it.szn.prenotazionesale.exception.GraphPaginationException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -131,7 +132,7 @@ class GraphCalendarGatewayTest {
     }
 
     @Test
-    @DisplayName("Superamento limite massimo di 50 pagine: solleva IllegalStateException")
+    @DisplayName("Superamento limite massimo di 50 pagine: solleva GraphPaginationException")
     void testGetEventi_SuperamentoLimiteMassimoPagine_LanciaEccezione() {
         CalendarViewRequestBuilder mockCalendarView = graphClient.users().byUserId(SALA_EMAIL).calendarView();
 
@@ -142,7 +143,7 @@ class GraphCalendarGatewayTest {
         when(mockCalendarView.get(any())).thenReturn(loopingPage);
         when(mockCalendarView.withUrl(anyString())).thenReturn(mockCalendarView);
 
-        IllegalStateException ex = assertThrows(IllegalStateException.class, () ->
+        GraphPaginationException ex = assertThrows(GraphPaginationException.class, () ->
                 gateway.getEventi(SALA_EMAIL, START_ISO, END_ISO)
         );
 

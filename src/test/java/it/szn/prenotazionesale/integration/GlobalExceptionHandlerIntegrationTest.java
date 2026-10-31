@@ -2,7 +2,9 @@ package it.szn.prenotazionesale.integration;
 
 import com.microsoft.kiota.ApiException;
 import com.microsoft.kiota.ResponseHeaders;
+import it.szn.prenotazionesale.audit.SecurityAuditService;
 import it.szn.prenotazionesale.config.AppConfig;
+import it.szn.prenotazionesale.exception.GraphPaginationException;
 import it.szn.prenotazionesale.service.PrenotazioniService;
 import it.szn.prenotazionesale.service.SaleService;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,6 +16,7 @@ import org.springframework.http.MediaType;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -27,6 +30,8 @@ import java.util.concurrent.TimeoutException;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -63,6 +68,9 @@ class GlobalExceptionHandlerIntegrationTest {
 
         @MockitoBean
         private JwtDecoder jwtDecoder;
+
+        @MockitoSpyBean
+        private SecurityAuditService auditService;
 
         @MockitoBean
         private SaleService saleService;
@@ -178,6 +186,35 @@ class GlobalExceptionHandlerIntegrationTest {
                                 .andReturn();
 
                 assertNoInformationDisclosure(result.getResponse().getContentAsString());
+        }
+
+        @Test
+        @DisplayName("GraphPaginationException deve restituire 502 Bad Gateway con messaggio generico senza email e loggare audit")
+        void testGraphPaginationException_Returns502WithoutRoomEmailAndAuditsIncident() throws Exception {
+                when(saleService.getSale())
+                                .thenThrow(new GraphPaginationException(
+                                                "Superato il limite massimo di pagine (50) per la lettura del calendario della sala sala-segreta@szn.it"));
+
+                MvcResult result = mockMvc.perform(get("/api/sale")
+                                .header("Authorization", "Bearer " + validAdminToken))
+                                .andExpect(status().isBadGateway())
+                                .andExpect(jsonPath("$.status").value(502))
+                                .andExpect(jsonPath("$.title").value("Bad Gateway"))
+                                .andExpect(jsonPath("$.message")
+                                                .value("Impossibile leggere il calendario della sala al momento. Riprova più tardi."))
+                                .andReturn();
+
+                String body = result.getResponse().getContentAsString();
+                assertNoInformationDisclosure(body);
+                assertFalse(body.contains("sala-segreta@szn.it"), "L'email della sala non deve trapelare nel body");
+                assertFalse(body.contains("pagine"), "Il conteggio delle pagine non deve trapelare nel body");
+
+                verify(auditService).logGraphIncident(
+                                eq("GRAPH_PAGINATION_LIMIT"),
+                                eq("/api/sale"),
+                                eq(502),
+                                org.mockito.ArgumentMatchers.contains("sala-segreta@szn.it"),
+                                anyString());
         }
 
         // =========================================================================

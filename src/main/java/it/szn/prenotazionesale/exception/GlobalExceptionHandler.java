@@ -101,6 +101,24 @@ public class GlobalExceptionHandler {
                 .body(ErrorResponse.of(HttpStatus.CONFLICT.value(), ex.getMessage()));
     }
 
+    public ResponseEntity<ErrorResponse> handleGraphPagination(GraphPaginationException ex) {
+        return handleGraphPagination(ex, null);
+    }
+
+    @ExceptionHandler(GraphPaginationException.class)
+    public ResponseEntity<ErrorResponse> handleGraphPagination(GraphPaginationException ex, HttpServletRequest request) {
+        String correlationId = UUID.randomUUID().toString();
+        String uri = request != null ? request.getRequestURI() : "/api/prenotazioni";
+        log.error("[CorrID: {}] Superato il limite di paginazione Microsoft Graph: {}",
+                correlationId, auditService.sanitizeSensitiveText(ex.getMessage()));
+        auditService.logGraphIncident("GRAPH_PAGINATION_LIMIT", uri, HttpStatus.BAD_GATEWAY.value(),
+                ex.getMessage(), correlationId);
+        return ResponseEntity
+                .status(HttpStatus.BAD_GATEWAY)
+                .body(ErrorResponse.of(HttpStatus.BAD_GATEWAY.value(),
+                        "Impossibile leggere il calendario della sala al momento. Riprova più tardi."));
+    }
+
     public ResponseEntity<ErrorResponse> handleAccessDenied(AccessDeniedException ex) {
         return handleAccessDenied(ex, null);
     }

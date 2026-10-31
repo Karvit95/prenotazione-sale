@@ -3,6 +3,7 @@ package it.szn.prenotazionesale.graph;
 import com.microsoft.graph.models.Event;
 import com.microsoft.graph.models.EventCollectionResponse;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
+import it.szn.prenotazionesale.exception.GraphPaginationException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -37,7 +38,7 @@ public class GraphCalendarGateway {
      * @param dataInizio estremo inferiore intervallo (formato ISO-8601)
      * @param dataFine   estremo superiore intervallo (formato ISO-8601)
      * @return lista completa degli eventi dell'intervallo
-     * @throws IllegalStateException se il numero di pagine supera il limite massimo di sicurezza (50)
+     * @throws GraphPaginationException se il numero di pagine supera il limite massimo di sicurezza (50)
      */
     public List<Event> getEventi(String salaEmail, String dataInizio, String dataFine) {
         List<Event> tuttiEventi = new ArrayList<>();
@@ -56,7 +57,7 @@ public class GraphCalendarGateway {
             if (numeroPagine > MAX_PAGINE) {
                 log.warn("Superato il limite massimo di pagine ({}) per la sala {} nell'intervallo {} - {}",
                         MAX_PAGINE, salaEmail, dataInizio, dataFine);
-                throw new IllegalStateException(String.format(
+                throw new GraphPaginationException(String.format(
                         "Superato il limite massimo di pagine (%d) per la lettura del calendario della sala %s",
                         MAX_PAGINE, salaEmail));
             }
