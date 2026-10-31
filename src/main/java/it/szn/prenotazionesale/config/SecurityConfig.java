@@ -43,9 +43,7 @@ public class SecurityConfig {
 
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
-        String adminRole = (appConfig.getAdminRole() != null && !appConfig.getAdminRole().isBlank())
-                ? appConfig.getAdminRole()
-                : "RoomBooking.Admin";
+        String adminRole = (appConfig != null) ? appConfig.resolveAdminRole() : AppConfig.DEFAULT_ADMIN_ROLE;
 
         http
             // 1. CORS restrittivo e sicuro

@@ -759,10 +759,9 @@ public class PrenotazioniService {
             return false;
         }
         List<String> ruoli = jwt.getClaimAsStringList("roles");
-        String expectedRole = (appConfig != null && appConfig.getAdminRole() != null
-                && !appConfig.getAdminRole().isBlank())
-                        ? appConfig.getAdminRole()
-                        : "RoomBooking.Admin";
+        String expectedRole = (appConfig != null)
+                ? appConfig.resolveAdminRole()
+                : AppConfig.DEFAULT_ADMIN_ROLE;
         return ruoli != null && ruoli.contains(expectedRole);
     }
 

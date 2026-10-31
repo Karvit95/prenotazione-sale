@@ -60,7 +60,7 @@ public class PrenotazioniController {
     }
 
     // POST /api/prenotazioni
-    @PreAuthorize("hasRole('RoomBooking.Admin')")
+    @PreAuthorize("hasRole(@appConfig.resolveAdminRole())")
     @PostMapping
     public ResponseEntity<PrenotazioneDTO> creaPrenotazione(
             @Valid @RequestBody PrenotazioneRequestDTO request,
@@ -81,7 +81,7 @@ public class PrenotazioniController {
     }
 
     // PATCH /api/prenotazioni/{eventId}?salaEmail=...
-    @PreAuthorize("hasRole('RoomBooking.Admin')")
+    @PreAuthorize("hasRole(@appConfig.resolveAdminRole())")
     @PatchMapping("/{eventId}")
     public ResponseEntity<PrenotazioneDTO> modificaPrenotazione(
             @PathVariable String eventId,
@@ -100,7 +100,7 @@ public class PrenotazioniController {
     }
 
     // DELETE /api/prenotazioni/{eventId}?salaEmail=...&tipoCancellazione=SINGOLA&seriesMasterId=... (default: SINGOLA)
-    @PreAuthorize("hasRole('RoomBooking.Admin')")
+    @PreAuthorize("hasRole(@appConfig.resolveAdminRole())")
     @DeleteMapping("/{eventId}")
     public ResponseEntity<Void> cancellaPrenotazione(
             @PathVariable String eventId,

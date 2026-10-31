@@ -12,10 +12,26 @@ import lombok.ToString;
 @ConfigurationProperties(prefix = "app")
 public class AppConfig {
 
+    public static final String DEFAULT_ADMIN_ROLE = "RoomBooking.Admin";
+
     private String adminRole;
     private Cors cors = new Cors();
     private Azure azure = new Azure();
     private Security security = new Security();
+
+    /**
+     * Risolve il ruolo di amministratore configurato per l'applicazione.
+     * Restituisce il valore configurato (con trim) oppure il valore di default
+     * {@link #DEFAULT_ADMIN_ROLE} se non specificato o vuoto.
+     *
+     * @return nome del ruolo admin (senza prefisso ROLE_)
+     */
+    public String resolveAdminRole() {
+        if (adminRole != null && !adminRole.isBlank()) {
+            return adminRole.trim();
+        }
+        return DEFAULT_ADMIN_ROLE;
+    }
 
     @Data
     public static class Security {
