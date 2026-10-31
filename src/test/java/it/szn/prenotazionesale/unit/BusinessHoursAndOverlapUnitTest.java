@@ -1,5 +1,6 @@
 package it.szn.prenotazionesale.unit;
 
+import it.szn.prenotazionesale.validator.PrenotazioneValidator;
 import com.microsoft.graph.models.DateTimeTimeZone;
 import com.microsoft.graph.models.Event;
 import it.szn.prenotazionesale.graph.GraphCalendarGateway;
@@ -67,7 +68,7 @@ public class BusinessHoursAndOverlapUnitTest {
                 SalaDTO.builder().id(SALA_ALTRA).nome("Sala Polifunzionale").email(SALA_ALTRA).build()
         ));
 
-        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor);
+        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor, new PrenotazioneValidator());
     }
 
     private Jwt createAdminJwt() {

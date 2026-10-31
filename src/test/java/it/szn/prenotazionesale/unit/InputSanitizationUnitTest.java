@@ -1,5 +1,6 @@
 package it.szn.prenotazionesale.unit;
 
+import it.szn.prenotazionesale.validator.PrenotazioneValidator;
 import com.microsoft.graph.models.*;
 import it.szn.prenotazionesale.graph.GraphCalendarGateway;
 import it.szn.prenotazionesale.config.AppConfig;
@@ -66,7 +67,7 @@ public class InputSanitizationUnitTest {
                 SalaDTO.builder().id(SALA_VALIDA).nome("Sala Dohrn").email(SALA_VALIDA).build()
         ));
 
-        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor);
+        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor, new PrenotazioneValidator());
     }
 
     private Jwt createAdminJwt() {

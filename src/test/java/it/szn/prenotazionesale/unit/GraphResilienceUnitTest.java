@@ -1,6 +1,7 @@
 package it.szn.prenotazionesale.unit;
 
 import com.microsoft.graph.models.DateTimeTimeZone;
+import it.szn.prenotazionesale.validator.PrenotazioneValidator;
 import com.microsoft.graph.models.Event;
 import com.microsoft.graph.models.Room;
 import com.microsoft.graph.models.RoomCollectionResponse;
@@ -94,7 +95,7 @@ public class GraphResilienceUnitTest {
                 SalaDTO.builder().id(SALA_2).nome("Sala 2").email(SALA_2).build()
         ));
 
-        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor);
+        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor, new PrenotazioneValidator());
         exceptionHandler = new GlobalExceptionHandler();
     }
 
