@@ -119,11 +119,11 @@ public class RateLimitingFilter implements Filter {
             return;
         }
         List<String> allowedOrigins = List.of("http://localhost:5173");
-        if (appConfig != null && appConfig.getCors() != null
-                && appConfig.getCors().getAllowedOrigins() != null
-                && !appConfig.getCors().getAllowedOrigins().isBlank()) {
-            allowedOrigins = Arrays.stream(appConfig.getCors().getAllowedOrigins().split(","))
-                    .map(String::trim)
+        AppConfig.Cors corsConfig = (appConfig != null) ? appConfig.getCors() : null;
+        String rawAllowedOrigins = (corsConfig != null) ? corsConfig.getAllowedOrigins() : null;
+        if (rawAllowedOrigins != null && !rawAllowedOrigins.isBlank()) {
+            allowedOrigins = Arrays.stream(rawAllowedOrigins.split(","))
+                    .map(s -> s == null ? "" : s.trim())
                     .filter(s -> !s.isEmpty())
                     .toList();
         }

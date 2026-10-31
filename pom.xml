@@ -127,11 +127,10 @@
 					</annotationProcessorPaths>
 				</configuration>
 			</plugin>
-			<!-- NIS 2 Art. 21 Supply Chain: generazione SBOM CycloneDX -->
+			<!-- NIS 2 Art. 21 Supply Chain: generazione SBOM CycloneDX (versione gestita da spring-boot-starter-parent) -->
 			<plugin>
 				<groupId>org.cyclonedx</groupId>
 				<artifactId>cyclonedx-maven-plugin</artifactId>
-				<version>2.9.1</version>
 				<executions>
 					<execution>
 						<phase>package</phase>

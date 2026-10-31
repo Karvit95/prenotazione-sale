@@ -34,7 +34,6 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.jwt.Jwt;
 
 import java.time.Instant;
-import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Map;
 
@@ -44,11 +43,15 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 /**
- * Test di conformità ai requisiti NIS 2 (Art. 21 - Gestione rischi e tracciamento incidenti di cibersicurezza)
- * e GDPR (Art. 30 e Art. 32 - Accountability, tracciabilità accessi e modifiche dati personali).
+ * Test di conformità ai requisiti NIS 2 (Art. 21 - Gestione rischi e
+ * tracciamento incidenti di cibersicurezza)
+ * e GDPR (Art. 30 e Art. 32 - Accountability, tracciabilità accessi e modifiche
+ * dati personali).
  *
- * Verifica che per ogni operazione critica (creazione, modifica, cancellazione, 401 unauthenticated,
- * 403 unauthorized, incidenti cloud Graph) venga emesso un audit trail immutabile contenente:
+ * Verifica che per ogni operazione critica (creazione, modifica, cancellazione,
+ * 401 unauthenticated,
+ * 403 unauthorized, incidenti cloud Graph) venga emesso un audit trail
+ * immutabile contenente:
  * - User Object ID (o identità chiamante)
  * - Timestamp strutturato ISO-8601
  * - Azione eseguita
@@ -95,9 +98,7 @@ class Nis2SecurityAuditTrailTest {
                         "oid", oid,
                         "preferred_username", upn,
                         "roles", roles,
-                        "sub", oid
-                )
-        );
+                        "sub", oid));
     }
 
     @Test
@@ -123,12 +124,12 @@ class Nis2SecurityAuditTrailTest {
                         .start("2026-11-01T09:00:00")
                         .end("2026-11-01T10:00:00")
                         .organizzatoreNome("Mario Rossi")
-                        .build()
-        );
+                        .build());
 
         controller.creaPrenotazione(dto, jwt);
 
-        assertFalse(listAppender.list.isEmpty(), "Un evento di sicurezza deve essere stato emesso nel logger SECURITY_AUDIT");
+        assertFalse(listAppender.list.isEmpty(),
+                "Un evento di sicurezza deve essere stato emesso nel logger SECURITY_AUDIT");
         ILoggingEvent loggingEvent = listAppender.list.get(listAppender.list.size() - 1);
         assertEquals(Level.INFO, loggingEvent.getLevel());
 
@@ -188,13 +189,13 @@ class Nis2SecurityAuditTrailTest {
                         .id("event-789")
                         .salaEmail("sala.actinia@szn.it")
                         .titolo("Seminario Biologia Modificato")
-                        .build()
-        );
+                        .build());
 
         controller.modificaPrenotazione("event-789", dto, jwt);
 
         assertFalse(listAppender.list.isEmpty());
-        JsonNode json = objectMapper.readTree(listAppender.list.get(listAppender.list.size() - 1).getFormattedMessage());
+        JsonNode json = objectMapper
+                .readTree(listAppender.list.get(listAppender.list.size() - 1).getFormattedMessage());
 
         assertEquals("user-admin-uuid-002", json.get("userObjectId").asText());
         assertEquals("UPDATE_BOOKING", json.get("action").asText());
@@ -216,7 +217,8 @@ class Nis2SecurityAuditTrailTest {
         controller.cancellaPrenotazione("event-delete-999", "sala.dohrn@szn.it", "SINGOLA", null, jwt);
 
         assertFalse(listAppender.list.isEmpty());
-        JsonNode json = objectMapper.readTree(listAppender.list.get(listAppender.list.size() - 1).getFormattedMessage());
+        JsonNode json = objectMapper
+                .readTree(listAppender.list.get(listAppender.list.size() - 1).getFormattedMessage());
 
         assertEquals("user-admin-uuid-003", json.get("userObjectId").asText());
         assertEquals("DELETE_BOOKING", json.get("action").asText());
@@ -241,7 +243,8 @@ class Nis2SecurityAuditTrailTest {
         assertEquals(401, response.getStatus());
         assertFalse(listAppender.list.isEmpty());
 
-        JsonNode json = objectMapper.readTree(listAppender.list.get(listAppender.list.size() - 1).getFormattedMessage());
+        JsonNode json = objectMapper
+                .readTree(listAppender.list.get(listAppender.list.size() - 1).getFormattedMessage());
 
         assertEquals("AUTH_FAILURE", json.get("eventType").asText());
         assertEquals("AUTHENTICATE", json.get("action").asText());
@@ -277,7 +280,8 @@ class Nis2SecurityAuditTrailTest {
         assertEquals(403, response.getStatus());
         assertFalse(listAppender.list.isEmpty());
 
-        JsonNode json = objectMapper.readTree(listAppender.list.get(listAppender.list.size() - 1).getFormattedMessage());
+        JsonNode json = objectMapper
+                .readTree(listAppender.list.get(listAppender.list.size() - 1).getFormattedMessage());
 
         assertEquals("ACCESS_VIOLATION", json.get("eventType").asText());
         assertEquals("POST /api/prenotazioni", json.get("action").asText());
@@ -294,6 +298,8 @@ class Nis2SecurityAuditTrailTest {
     }
 
     private static class TestApiException extends ApiException {
+        private static final long serialVersionUID = 1L;
+
         public TestApiException(int statusCode, String message, ResponseHeaders headers) {
             super(message);
             setResponseStatusCode(statusCode);
@@ -316,7 +322,8 @@ class Nis2SecurityAuditTrailTest {
         exceptionHandler.handleGraphApiException(throttlingException, request);
 
         assertFalse(listAppender.list.isEmpty());
-        JsonNode json = objectMapper.readTree(listAppender.list.get(listAppender.list.size() - 1).getFormattedMessage());
+        JsonNode json = objectMapper
+                .readTree(listAppender.list.get(listAppender.list.size() - 1).getFormattedMessage());
 
         assertEquals("GRAPH_INCIDENT", json.get("eventType").asText());
         assertEquals("GRAPH_API_CALL", json.get("action").asText());

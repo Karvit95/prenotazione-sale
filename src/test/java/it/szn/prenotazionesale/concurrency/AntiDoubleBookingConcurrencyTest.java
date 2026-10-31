@@ -1,10 +1,7 @@
 package it.szn.prenotazionesale.concurrency;
 
-import com.microsoft.graph.models.DateTimeTimeZone;
 import com.microsoft.graph.models.Event;
 import com.microsoft.graph.models.EventCollectionResponse;
-import com.microsoft.graph.models.ItemBody;
-import com.microsoft.graph.models.BodyType;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
 import it.szn.prenotazionesale.audit.SecurityAuditService;
 import it.szn.prenotazionesale.config.AppConfig;
@@ -21,7 +18,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.Answers;
-import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
