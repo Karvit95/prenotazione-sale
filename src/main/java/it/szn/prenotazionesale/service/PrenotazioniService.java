@@ -2,6 +2,7 @@ package it.szn.prenotazionesale.service;
 
 import com.microsoft.graph.models.*;
 import it.szn.prenotazionesale.graph.GraphCalendarGateway;
+import it.szn.prenotazionesale.mapper.PrenotazioneMapper;
 import it.szn.prenotazionesale.validator.PrenotazioneValidator;
 import com.microsoft.kiota.ApiException;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
@@ -50,6 +51,7 @@ public class PrenotazioniService {
     private final AppConfig appConfig;
     private final ThreadPoolTaskExecutor executorGraphParallelo;
     private final PrenotazioneValidator validator;
+    private final PrenotazioneMapper mapper;
 
     /**
      * Mappa dei lock rientranti per singola sala.
@@ -65,12 +67,14 @@ public class PrenotazioniService {
             SaleService saleService,
             AppConfig appConfig,
             @Qualifier("graphQueryExecutor") ThreadPoolTaskExecutor executorGraphParallelo,
-            PrenotazioneValidator validator) {
+            PrenotazioneValidator validator,
+            PrenotazioneMapper mapper) {
         this.calendarGateway = calendarGateway;
         this.saleService = saleService;
         this.appConfig = appConfig;
         this.executorGraphParallelo = executorGraphParallelo;
         this.validator = validator;
+        this.mapper = mapper;
     }
 
     private static final Pattern PATTERN_ICALUID_SICURO = Pattern.compile("^[A-Za-z0-9._~@+=/-]{1,255}$");
@@ -130,7 +134,8 @@ public class PrenotazioniService {
 
         log.debug("Trovati {} eventi per la sala {}", events.size(), salaNormalizzata);
 
-        return events.stream().map(event -> mapToDTO(event, salaNormalizzata, jwt)).collect(Collectors.toList());
+        boolean modificabile = isAdmin(jwt);
+        return events.stream().map(event -> mapper.mapToDTO(event, salaNormalizzata, modificabile)).collect(Collectors.toList());
     }
 
     /**
@@ -203,11 +208,11 @@ public class PrenotazioniService {
                 throw new IllegalStateException("Timeout acquisizione lock per la sala: " + request.getSalaEmail());
             }
             verificaDisponibilita(request, null, jwt);
-            var event = buildEvent(request);
+            var event = mapper.buildEvent(request);
             var createdEvent = calendarGateway.creaEvento(request.getSalaEmail(), event);
 
             log.info("Prenotazione creata con ID {}", createdEvent.getId());
-            return mapToDTO(createdEvent, request.getSalaEmail(), jwt);
+            return mapper.mapToDTO(createdEvent, request.getSalaEmail(), isAdmin(jwt));
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Operazione interrotta durante l'acquisizione del lock", ie);
@@ -234,9 +239,9 @@ public class PrenotazioniService {
      *
      * In caso di Modifica sulla Stessa Sala:
      * - Per le serie ricorrenti, aggiorna il Series Master preservando start ed end
-     * se l'orario non ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ variato,
-     * cosÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ da mantenere intatte le singole
-     * eccezioni giÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  configurate nella
+     * se l'orario non è variato,
+     * così da mantenere intatte le singole
+     * eccezioni già configurate nella
      * serie.
      * - Per le singole occorrenze, aggiorna i dati specifici della data
      * selezionata.
@@ -249,6 +254,7 @@ public class PrenotazioniService {
     public PrenotazioneDTO modificaPrenotazione(String eventId, PrenotazioneRequestDTO request, Jwt jwt) {
         log.info("Modifica prenotazione ID {} per sala {}", eventId, request.getSalaEmail());
         verificaAdmin(jwt);
+        boolean modificabile = isAdmin(jwt);
         validaSalaAutorizzata(request.getSalaEmail());
         if (request.getSalaEmailOriginale() != null && !request.getSalaEmailOriginale().isBlank()) {
             validaSalaAutorizzata(request.getSalaEmailOriginale());
@@ -321,15 +327,7 @@ public class PrenotazioniService {
 
                     // Ricostruzione esplicita della serie ricorrente nella sala di destinazione
                     var nuovoEvento = new Event();
-                    nuovoEvento.setSubject(validator.stripHtml(request.getTitolo()));
-
-                    if (request.getDescrizione() != null) {
-                        var body = new ItemBody();
-                        String descSanificata = validator.stripHtml(request.getDescrizione());
-                        body.setContent(descSanificata != null ? descSanificata : "");
-                        body.setContentType(BodyType.Text);
-                        nuovoEvento.setBody(body);
-                    }
+                    mapper.impostaTitoloEDescrizione(nuovoEvento, request);
 
                     var start = new DateTimeTimeZone();
                     start.setDateTime(masterOriginale.getStart().getDateTime());
@@ -373,7 +371,7 @@ public class PrenotazioniService {
                     log.info("Nuova serie creata con ID {} nella sala {} (originata dal master {})",
                             createdEvent.getId(), request.getSalaEmail(), request.getSeriesMasterId());
 
-                    nuovaPrenotazione = mapToDTO(createdEvent, request.getSalaEmail(), jwt);
+                    nuovaPrenotazione = mapper.mapToDTO(createdEvent, request.getSalaEmail(), modificabile);
                 } else if (!modificaSerie && haSeriesMaster) {
                     // Cambio sala su singola occorrenza: genera un evento singolo non ricorrente
                     // nella nuova sala
@@ -430,8 +428,7 @@ public class PrenotazioniService {
             String tipoModifica = request.getTipoModifica();
             boolean modificaSerie = "SERIE".equals(tipoModifica);
 
-            // Esclude dal controllo di
-            // disponibilitÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  l'evento stesso o il
+            // Esclude dal controllo di disponibilità l'evento stesso o il
             // master della serie in modifica
             String seriesMasterIdDaEscludere = modificaSerie
                     ? ((request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank())
@@ -447,15 +444,7 @@ public class PrenotazioniService {
                         : eventId;
 
                 var event = new Event();
-                event.setSubject(validator.stripHtml(request.getTitolo()));
-
-                if (request.getDescrizione() != null) {
-                    var body = new ItemBody();
-                    String descSanificata = validator.stripHtml(request.getDescrizione());
-                    body.setContent(descSanificata != null ? descSanificata : "");
-                    body.setContentType(BodyType.Text);
-                    event.setBody(body);
-                }
+                mapper.impostaTitoloEDescrizione(event, request);
 
                 String nuovoStartDateTime;
                 String nuovoEndDateTime;
@@ -513,20 +502,12 @@ public class PrenotazioniService {
 
                 var updatedEvent = calendarGateway.aggiornaEvento(request.getSalaEmail(), idSuCuiOperare, event);
                 log.info("Prenotazione (serie, ID {}) modificata con successo", idSuCuiOperare);
-                return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
+                return mapper.mapToDTO(updatedEvent, request.getSalaEmail(), modificabile);
             } else {
                 // Aggiornamento della singola occorrenza: aggiorna solo i dettagli di questa
                 // specifica istanza
                 var event = new Event();
-                event.setSubject(validator.stripHtml(request.getTitolo()));
-
-                if (request.getDescrizione() != null) {
-                    var body = new ItemBody();
-                    String descSanificata = validator.stripHtml(request.getDescrizione());
-                    body.setContent(descSanificata != null ? descSanificata : "");
-                    body.setContentType(BodyType.Text);
-                    event.setBody(body);
-                }
+                mapper.impostaTitoloEDescrizione(event, request);
 
                 var start = new DateTimeTimeZone();
                 start.setDateTime(request.getStart());
@@ -540,7 +521,7 @@ public class PrenotazioniService {
 
                 var updatedEvent = calendarGateway.aggiornaEvento(request.getSalaEmail(), eventId, event);
                 log.info("Prenotazione (occorrenza singola) {} modificata con successo", eventId);
-                return mapToDTO(updatedEvent, request.getSalaEmail(), jwt);
+                return mapper.mapToDTO(updatedEvent, request.getSalaEmail(), modificabile);
             }
 
         } catch (InterruptedException ie) {
@@ -555,7 +536,7 @@ public class PrenotazioniService {
 
     /**
      * Cancella una prenotazione o una serie ricorrente.
-     * Overload di comoditÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  per default
+     * Overload di comodità per default
      * tipo 'SERIE'.
      */
     public void cancellaPrenotazione(String eventId, String salaEmail, Jwt jwt) {
@@ -676,156 +657,6 @@ public class PrenotazioniService {
     }
 
     // --- Metodi privati di supporto ---
-
-    /**
-     * Costruisce l'oggetto Event di Microsoft Graph popolando metadati, intervalli
-     * orari
-     * (con fuso orario fissato a Europe/Rome) ed eventuale regola di ricorrenza
-     * (Daily, Weekly, Monthly).
-     */
-    private Event buildEvent(PrenotazioneRequestDTO request) {
-        log.debug("Costruzione evento per sala {}: start={}, end={}", request.getSalaEmail(), request.getStart(),
-                request.getEnd());
-        var event = new Event();
-        event.setSubject(validator.stripHtml(request.getTitolo()));
-
-        if (request.getDescrizione() != null) {
-            var body = new ItemBody();
-            String descSanificata = validator.stripHtml(request.getDescrizione());
-            body.setContent(descSanificata != null ? descSanificata : "");
-            body.setContentType(BodyType.Text);
-            event.setBody(body);
-        }
-
-        DateTimeFormatter fmtIso = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
-        LocalDateTime parsedStart = validator.parseIsoToRomeLocalDateTime(request.getStart());
-        LocalDateTime parsedEnd = validator.parseIsoToRomeLocalDateTime(request.getEnd());
-
-        var start = new DateTimeTimeZone();
-        start.setDateTime(parsedStart.format(fmtIso));
-        start.setTimeZone("Europe/Rome");
-        event.setStart(start);
-
-        var end = new DateTimeTimeZone();
-        end.setDateTime(parsedEnd.format(fmtIso));
-        end.setTimeZone("Europe/Rome");
-        event.setEnd(end);
-
-        if (request.getPattern() != null && !request.getPattern().isEmpty()) {
-            PatternedRecurrence recurrence = new PatternedRecurrence();
-
-            String startDateStr = request.getStart().length() > 10
-                    ? request.getStart().substring(0, 10)
-                    : request.getStart();
-            LocalDate dataInizio = LocalDate.parse(startDateStr);
-
-            RecurrencePattern pattern = new RecurrencePattern();
-            pattern.setInterval(request.getIntervallo() != null ? request.getIntervallo() : 1);
-
-            switch (request.getPattern().toLowerCase()) {
-                case "daily":
-                    pattern.setType(RecurrencePatternType.Daily);
-                    break;
-                case "weekly":
-                    pattern.setType(RecurrencePatternType.Weekly);
-                    if (request.getGiorniSettimana() != null && !request.getGiorniSettimana().isEmpty()) {
-                        pattern.setDaysOfWeek(request.getGiorniSettimana().stream()
-                                .map(giorno -> DayOfWeek.forValue(giorno.toLowerCase()))
-                                .collect(Collectors.toList()));
-                    } else {
-                        String dayName = dataInizio.getDayOfWeek().name().toLowerCase();
-                        pattern.setDaysOfWeek(List.of(DayOfWeek.forValue(dayName)));
-                    }
-                    break;
-                case "monthly":
-                    pattern.setType(RecurrencePatternType.AbsoluteMonthly);
-                    pattern.setDayOfMonth(dataInizio.getDayOfMonth());
-                    break;
-                default:
-                    throw new IllegalArgumentException("Tipo di ricorrenza non supportato: " + request.getPattern());
-            }
-
-            recurrence.setPattern(pattern);
-
-            RecurrenceRange range = new RecurrenceRange();
-            range.setType(RecurrenceRangeType.EndDate);
-
-            if (request.getDataFine() != null) {
-                String dataFineStr = request.getDataFine().length() > 10
-                        ? request.getDataFine().substring(0, 10)
-                        : request.getDataFine();
-                range.setEndDate(LocalDate.parse(dataFineStr));
-            } else {
-                range.setNumberOfOccurrences(365);
-                range.setType(RecurrenceRangeType.Numbered);
-            }
-
-            range.setStartDate(dataInizio);
-            recurrence.setRange(range);
-
-            event.setRecurrence(recurrence);
-            log.debug("Ricorrenza aggiunta: pattern={}, intervallo={}, dataFine={}",
-                    request.getPattern(), request.getIntervallo(), request.getDataFine());
-        }
-
-        return event;
-    }
-
-    /**
-     * Mappa un evento Microsoft Graph nel DTO applicativo per il frontend.
-     * Estrae identificativi di serie, ripulisce la descrizione da tag HTML e
-     * verifica i diritti di modifica.
-     */
-    private PrenotazioneDTO mapToDTO(Event event, String salaEmail, Jwt jwt) {
-        boolean isAdmin = isAdmin(jwt);
-
-        String seriesMasterId = null;
-        boolean ricorrente = false;
-        String pattern = null;
-
-        if (event.getSeriesMasterId() != null && !event.getSeriesMasterId().isEmpty()) {
-            seriesMasterId = event.getSeriesMasterId();
-            ricorrente = true;
-        }
-        if (event.getRecurrence() != null && event.getRecurrence().getPattern() != null) {
-            ricorrente = true;
-            RecurrencePatternType patternType = event.getRecurrence().getPattern().getType();
-            if (patternType != null) {
-                switch (patternType) {
-                    case Daily:
-                        pattern = "daily";
-                        break;
-                    case Weekly:
-                        pattern = "weekly";
-                        break;
-                    case AbsoluteMonthly:
-                        pattern = "monthly";
-                        break;
-                    default:
-                        pattern = patternType.toString().toLowerCase();
-                }
-            }
-        }
-
-        String descrizionePulita = null;
-        if (event.getBody() != null && event.getBody().getContent() != null) {
-            descrizionePulita = validator.stripHtml(event.getBody().getContent());
-        }
-
-        return PrenotazioneDTO.builder().id(event.getId())
-                .salaId(salaEmail != null ? salaEmail.trim().toLowerCase() : null).salaEmail(salaEmail)
-                .titolo(event.getSubject()).descrizione(descrizionePulita)
-                .start(event.getStart() != null ? event.getStart().getDateTime() : null)
-                .end(event.getEnd() != null ? event.getEnd().getDateTime() : null)
-                .organizzatoreNome(event.getOrganizer() != null && event.getOrganizer().getEmailAddress() != null
-                        ? event.getOrganizer().getEmailAddress().getName()
-                        : null)
-                .modificabile(isAdmin)
-                .seriesMasterId(seriesMasterId)
-                .ricorrente(ricorrente)
-                .pattern(pattern)
-                .build();
-    }
 
     /**
      * Verifica la disponibilità della sala per la prenotazione richiesta, escludendo l'evento in modifica.

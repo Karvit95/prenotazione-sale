@@ -1,5 +1,6 @@
 package it.szn.prenotazionesale.security;
 
+import it.szn.prenotazionesale.mapper.PrenotazioneMapper;
 import it.szn.prenotazionesale.validator.PrenotazioneValidator;
 import it.szn.prenotazionesale.graph.GraphCalendarGateway;
 import it.szn.prenotazionesale.config.AppConfig;
@@ -42,7 +43,9 @@ class SecurityHardeningTest {
                 SalaDTO.builder().id("sala1@szn.it").nome("Sala Dohrn").email("sala1@szn.it").build()
         ));
 
-        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor, new PrenotazioneValidator());
+        PrenotazioneValidator validator = new PrenotazioneValidator();
+        PrenotazioneMapper mapper = new PrenotazioneMapper(validator);
+        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, executor, validator, mapper);
     }
 
     private Jwt buildMockAdminJwt() {

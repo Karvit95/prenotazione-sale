@@ -7,6 +7,7 @@ import it.szn.prenotazionesale.config.AppConfig;
 import it.szn.prenotazionesale.controller.PrenotazioniController;
 import it.szn.prenotazionesale.exception.ErrorResponse;
 import it.szn.prenotazionesale.exception.GlobalExceptionHandler;
+import it.szn.prenotazionesale.mapper.PrenotazioneMapper;
 import it.szn.prenotazionesale.validator.PrenotazioneValidator;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
@@ -116,7 +117,9 @@ public class AntiDoubleBookingConcurrencyTest {
                     return savedEvent;
                 });
 
-        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, taskExecutor, new PrenotazioneValidator());
+        PrenotazioneValidator validator = new PrenotazioneValidator();
+        PrenotazioneMapper mapper = new PrenotazioneMapper(validator);
+        prenotazioniService = new PrenotazioniService(calendarGateway, saleService, appConfig, taskExecutor, validator, mapper);
 
         auditService = Mockito.mock(SecurityAuditService.class);
         controller = new PrenotazioniController(prenotazioniService, auditService, new MockHttpServletRequest());
