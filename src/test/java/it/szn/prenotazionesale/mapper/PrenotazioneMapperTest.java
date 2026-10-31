@@ -17,8 +17,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Unit Test isolati per PrenotazioneMapper.
- * Verifica la corretta costruzione degli oggetti Event Graph da PrenotazioneRequestDTO
- * e la mappatura bidirezionale verso PrenotazioneDTO, senza dipendenze o mock di rete.
+ * Verifica la corretta costruzione degli oggetti Event Graph da
+ * PrenotazioneRequestDTO
+ * e la mappatura bidirezionale verso PrenotazioneDTO, senza dipendenze o mock
+ * di rete.
  */
 public class PrenotazioneMapperTest {
 
@@ -348,9 +350,9 @@ public class PrenotazioneMapperTest {
         @Test
         @DisplayName("Dovrebbe lanciare NullPointerException se event o request sono null")
         void testImpostaTitoloEDescrizione_NullParameters_ThrowsNpe() {
-            assertThrows(NullPointerException.class, () -> mapper.impostaTitoloEDescrizione(null, new PrenotazioneRequestDTO()));
+            assertThrows(NullPointerException.class,
+                    () -> mapper.impostaTitoloEDescrizione(null, new PrenotazioneRequestDTO()));
             assertThrows(NullPointerException.class, () -> mapper.impostaTitoloEDescrizione(new Event(), null));
         }
     }
 }
-
