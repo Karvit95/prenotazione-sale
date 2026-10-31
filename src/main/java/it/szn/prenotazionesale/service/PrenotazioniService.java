@@ -1,9 +1,14 @@
 package it.szn.prenotazionesale.service;
 
-import com.microsoft.graph.models.*;
 import it.szn.prenotazionesale.graph.GraphCalendarGateway;
 import it.szn.prenotazionesale.mapper.PrenotazioneMapper;
 import it.szn.prenotazionesale.validator.PrenotazioneValidator;
+
+import com.microsoft.graph.models.DateTimeTimeZone;
+import com.microsoft.graph.models.Event;
+import com.microsoft.graph.models.PatternedRecurrence;
+import com.microsoft.graph.models.RecurrencePattern;
+import com.microsoft.graph.models.RecurrenceRange;
 import com.microsoft.kiota.ApiException;
 import it.szn.prenotazionesale.model.PrenotazioneDTO;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
@@ -17,7 +22,6 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
@@ -26,6 +30,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -200,27 +205,14 @@ public class PrenotazioniService {
             validator.validaRicorrenza(request);
         }
 
-        ReentrantLock lock = getLockPerSala(request.getSalaEmail());
-        boolean lockAcquired = false;
-        try {
-            lockAcquired = lock.tryLock(10, TimeUnit.SECONDS);
-            if (!lockAcquired) {
-                throw new IllegalStateException("Timeout acquisizione lock per la sala: " + request.getSalaEmail());
-            }
+        return conLockSala(request.getSalaEmail(), () -> {
             verificaDisponibilita(request, null, jwt);
             var event = mapper.buildEvent(request);
             var createdEvent = calendarGateway.creaEvento(request.getSalaEmail(), event);
 
             log.info("Prenotazione creata con ID {}", createdEvent.getId());
             return mapper.mapToDTO(createdEvent, request.getSalaEmail(), isAdmin(jwt));
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Operazione interrotta durante l'acquisizione del lock", ie);
-        } finally {
-            if (lockAcquired) {
-                lock.unlock();
-            }
-        }
+        });
     }
 
     /**
@@ -263,173 +255,194 @@ public class PrenotazioniService {
         validator.validaOrariPrenotazione(request.getStart(), request.getEnd());
 
         String salaOriginale = request.getSalaEmailOriginale();
-
-        // Ramo 1: Cambio sala (migrazione tra due caselle Exchange distinte)
         if (salaOriginale != null && !salaOriginale.equals(request.getSalaEmail())) {
-            // Ordinamento lessicografico dei lock delle due sale per scongiurare deadlock
-            // tra richieste concorrenti
-            String primaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? salaOriginale
-                    : request.getSalaEmail();
-            String secondaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? request.getSalaEmail()
-                    : salaOriginale;
+            return modificaConCambioSala(eventId, request, jwt, modificabile);
+        } else {
+            return modificaNellaStessaSala(eventId, request, jwt, modificabile);
+        }
+    }
 
-            ReentrantLock lock1 = getLockPerSala(primaSala);
-            ReentrantLock lock2 = getLockPerSala(secondaSala);
+    /**
+     * Gestisce la migrazione atomica di una prenotazione (singola o serie) tra due sale differenti,
+     * serializzando l'accesso tramite lock ordinati lessicograficamente.
+     */
+    private PrenotazioneDTO modificaConCambioSala(String eventId, PrenotazioneRequestDTO request, Jwt jwt,
+            boolean modificabile) {
+        String salaOriginale = request.getSalaEmailOriginale();
+        String primaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? salaOriginale : request.getSalaEmail();
+        String secondaSala = salaOriginale.compareTo(request.getSalaEmail()) < 0 ? request.getSalaEmail() : salaOriginale;
 
-            boolean lock1Acquired = false;
-            boolean lock2Acquired = false;
-            try {
-                lock1Acquired = lock1.tryLock(10, TimeUnit.SECONDS);
-                if (!lock1Acquired) {
-                    throw new IllegalStateException("Timeout nell'acquisizione del lock per la sala: " + primaSala);
-                }
-                lock2Acquired = lock2.tryLock(10, TimeUnit.SECONDS);
-                if (!lock2Acquired) {
-                    throw new IllegalStateException("Timeout nell'acquisizione del lock per la sala: " + secondaSala);
-                }
-                log.info("Sala cambiata da {} a {}: creo il nuovo evento prima di cancellare il vecchio", salaOriginale,
-                        request.getSalaEmail());
+        ReentrantLock lock1 = getLockPerSala(primaSala);
+        ReentrantLock lock2 = getLockPerSala(secondaSala);
 
-                boolean modificaSerie = "SERIE".equals(request.getTipoModifica());
-                boolean haSeriesMaster = request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank();
+        boolean lock1Acquired = false;
+        boolean lock2Acquired = false;
+        try {
+            lock1Acquired = lock1.tryLock(10, TimeUnit.SECONDS);
+            if (!lock1Acquired) {
+                throw new IllegalStateException("Timeout nell'acquisizione del lock per la sala: " + primaSala);
+            }
+            lock2Acquired = lock2.tryLock(10, TimeUnit.SECONDS);
+            if (!lock2Acquired) {
+                throw new IllegalStateException("Timeout nell'acquisizione del lock per la sala: " + secondaSala);
+            }
+            log.info("Sala cambiata da {} a {}: creo il nuovo evento prima di cancellare il vecchio", salaOriginale,
+                    request.getSalaEmail());
 
-                PrenotazioneDTO nuovaPrenotazione;
+            boolean modificaSerie = "SERIE".equals(request.getTipoModifica());
+            boolean haSeriesMaster = request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank();
 
-                if (modificaSerie && haSeriesMaster) {
-                    // Cambio sala su intera serie: recupera il master originale per clonarne orari,
-                    // pattern e range
-                    log.info("Modifica serie su cambio sala: recupero master originale ID {} dalla sala {}",
-                            request.getSeriesMasterId(), salaOriginale);
+            PrenotazioneDTO nuovaPrenotazione;
+            if (modificaSerie && haSeriesMaster) {
+                nuovaPrenotazione = ricreaSerieInNuovaSala(request, jwt, modificabile);
+            } else if (!modificaSerie && haSeriesMaster) {
+                // Cambio sala su singola occorrenza: genera un evento singolo non ricorrente nella nuova sala
+                nuovaPrenotazione = creaPrenotazione(request, jwt);
+            } else {
+                // Evento singolo standard: crea la prenotazione nella nuova sala
+                nuovaPrenotazione = creaPrenotazione(request, jwt);
+            }
 
-                    var masterOriginale = calendarGateway.getEvento(salaOriginale, request.getSeriesMasterId());
+            String idDaCancellare = (modificaSerie && haSeriesMaster) ? request.getSeriesMasterId() : eventId;
+            eliminaOriginaleConRollback(salaOriginale, idDaCancellare, request, nuovaPrenotazione);
 
-                    // Verifica preliminare di disponibilità della sala di destinazione per l'intera durata della serie
-                    PrenotazioneRequestDTO checkRequest = new PrenotazioneRequestDTO();
-                    checkRequest.setSalaEmail(request.getSalaEmail());
-                    checkRequest.setStart(masterOriginale.getStart().getDateTime());
-                    checkRequest.setEnd(masterOriginale.getEnd().getDateTime());
-                    if (masterOriginale.getRecurrence() != null
-                            && masterOriginale.getRecurrence().getPattern() != null) {
-                        var p = masterOriginale.getRecurrence().getPattern();
-                        checkRequest.setPattern(p.getType() != null ? p.getType().name().toLowerCase() : null);
-                        checkRequest.setIntervallo(p.getInterval());
-                        if (p.getDaysOfWeek() != null) {
-                            checkRequest.setGiorniSettimana(
-                                    p.getDaysOfWeek().stream().map(d -> d.name()).collect(Collectors.toList()));
-                        }
-                    }
-                    if (masterOriginale.getRecurrence() != null && masterOriginale.getRecurrence().getRange() != null) {
-                        checkRequest.setDataFine(masterOriginale.getRecurrence().getRange().getEndDate() != null
-                                ? masterOriginale.getRecurrence().getRange().getEndDate().toString()
-                                : null);
-                    }
-                    verificaDisponibilita(checkRequest, null, jwt);
-
-                    // Ricostruzione esplicita della serie ricorrente nella sala di destinazione
-                    var nuovoEvento = new Event();
-                    mapper.impostaTitoloEDescrizione(nuovoEvento, request);
-
-                    var start = new DateTimeTimeZone();
-                    start.setDateTime(masterOriginale.getStart().getDateTime());
-                    start.setTimeZone("Europe/Rome");
-                    nuovoEvento.setStart(start);
-
-                    var end = new DateTimeTimeZone();
-                    end.setDateTime(masterOriginale.getEnd().getDateTime());
-                    end.setTimeZone("Europe/Rome");
-                    nuovoEvento.setEnd(end);
-
-                    var recurrenceOriginale = masterOriginale.getRecurrence();
-                    if (recurrenceOriginale != null && recurrenceOriginale.getPattern() != null) {
-                        var nuovaRecurrence = new PatternedRecurrence();
-
-                        var nuovoPattern = new RecurrencePattern();
-                        nuovoPattern.setType(recurrenceOriginale.getPattern().getType());
-                        nuovoPattern.setInterval(recurrenceOriginale.getPattern().getInterval());
-                        if (recurrenceOriginale.getPattern().getDaysOfWeek() != null) {
-                            nuovoPattern.setDaysOfWeek(recurrenceOriginale.getPattern().getDaysOfWeek());
-                        }
-                        if (recurrenceOriginale.getPattern().getDayOfMonth() != null) {
-                            nuovoPattern.setDayOfMonth(recurrenceOriginale.getPattern().getDayOfMonth());
-                        }
-                        nuovaRecurrence.setPattern(nuovoPattern);
-
-                        if (recurrenceOriginale.getRange() != null) {
-                            var nuovoRange = new RecurrenceRange();
-                            nuovoRange.setType(recurrenceOriginale.getRange().getType());
-                            nuovoRange.setStartDate(recurrenceOriginale.getRange().getStartDate());
-                            nuovoRange.setEndDate(recurrenceOriginale.getRange().getEndDate());
-                            nuovoRange.setNumberOfOccurrences(recurrenceOriginale.getRange().getNumberOfOccurrences());
-                            nuovaRecurrence.setRange(nuovoRange);
-                        }
-
-                        nuovoEvento.setRecurrence(nuovaRecurrence);
-                    }
-
-                    var createdEvent = calendarGateway.creaEvento(request.getSalaEmail(), nuovoEvento);
-
-                    log.info("Nuova serie creata con ID {} nella sala {} (originata dal master {})",
-                            createdEvent.getId(), request.getSalaEmail(), request.getSeriesMasterId());
-
-                    nuovaPrenotazione = mapper.mapToDTO(createdEvent, request.getSalaEmail(), modificabile);
-                } else if (!modificaSerie && haSeriesMaster) {
-                    // Cambio sala su singola occorrenza: genera un evento singolo non ricorrente
-                    // nella nuova sala
-                    nuovaPrenotazione = creaPrenotazione(request, jwt);
-                } else {
-                    // Evento singolo standard: crea la prenotazione nella nuova sala
-                    nuovaPrenotazione = creaPrenotazione(request, jwt);
-                }
-
-                String idDaCancellare = (modificaSerie && haSeriesMaster)
-                        ? request.getSeriesMasterId()
-                        : eventId;
-
-                try {
-                    calendarGateway.eliminaEvento(salaOriginale, idDaCancellare);
-                } catch (Exception e) {
-                    // Rollback compensativo: elimina l'evento appena creato per evitare la
-                    // persistenza di duplicati
-                    log.error(
-                            "Cancellazione evento originale {} su sala {} fallita. Tento rollback dell'evento creato {} su sala {}",
-                            idDaCancellare, salaOriginale, nuovaPrenotazione.getId(), request.getSalaEmail(), e);
-                    try {
-                        calendarGateway.eliminaEvento(request.getSalaEmail(), nuovaPrenotazione.getId());
-                        log.info("Rollback completato con successo: eliminato evento {}", nuovaPrenotazione.getId());
-                    } catch (Exception rollbackEx) {
-                        log.error("[SECURITY_INCIDENT - ROLLBACK_FAILURE] Rollback fallito per ID {} su sala {}: {}",
-                                nuovaPrenotazione.getId(), request.getSalaEmail(), rollbackEx.getMessage());
-                    }
-                    throw new IllegalStateException(
-                            "Impossibile completare il cambio sala: cancellazione fallita sulla sala precedente.", e);
-                }
-
-                return nuovaPrenotazione;
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("Operazione di cambio sala interrotta", ie);
-            } finally {
-                if (lock2Acquired)
-                    lock2.unlock();
-                if (lock1Acquired)
-                    lock1.unlock();
+            return nuovaPrenotazione;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Operazione di cambio sala interrotta", ie);
+        } finally {
+            if (lock2Acquired) {
+                lock2.unlock();
+            }
+            if (lock1Acquired) {
+                lock1.unlock();
             }
         }
+    }
 
-        // Ramo 2: Modifica nella stessa sala
-        ReentrantLock lock = getLockPerSala(request.getSalaEmail());
-        boolean lockAcquired = false;
-        try {
-            lockAcquired = lock.tryLock(10, TimeUnit.SECONDS);
-            if (!lockAcquired) {
-                throw new IllegalStateException("Timeout acquisizione lock per la sala: " + request.getSalaEmail());
+    /**
+     * Ricrea una serie ricorrente completa nella nuova sala di destinazione clonando
+     * orari e pattern dal master originale.
+     */
+    private PrenotazioneDTO ricreaSerieInNuovaSala(PrenotazioneRequestDTO request, Jwt jwt, boolean modificabile) {
+        String salaOriginale = request.getSalaEmailOriginale();
+        log.info("Modifica serie su cambio sala: recupero master originale ID {} dalla sala {}",
+                request.getSeriesMasterId(), salaOriginale);
+
+        var masterOriginale = calendarGateway.getEvento(salaOriginale, request.getSeriesMasterId());
+        PrenotazioneRequestDTO checkRequest = costruisciCheckRequestDaMaster(masterOriginale, request.getSalaEmail());
+        verificaDisponibilita(checkRequest, null, jwt);
+
+        var nuovoEvento = new Event();
+        mapper.impostaTitoloEDescrizione(nuovoEvento, request);
+
+        var start = new DateTimeTimeZone();
+        start.setDateTime(masterOriginale.getStart().getDateTime());
+        start.setTimeZone("Europe/Rome");
+        nuovoEvento.setStart(start);
+
+        var end = new DateTimeTimeZone();
+        end.setDateTime(masterOriginale.getEnd().getDateTime());
+        end.setTimeZone("Europe/Rome");
+        nuovoEvento.setEnd(end);
+
+        if (masterOriginale.getRecurrence() != null) {
+            nuovoEvento.setRecurrence(clonaRicorrenza(masterOriginale.getRecurrence()));
+        }
+
+        var createdEvent = calendarGateway.creaEvento(request.getSalaEmail(), nuovoEvento);
+        log.info("Nuova serie creata con ID {} nella sala {} (originata dal master {})",
+                createdEvent.getId(), request.getSalaEmail(), request.getSeriesMasterId());
+
+        return mapper.mapToDTO(createdEvent, request.getSalaEmail(), modificabile);
+    }
+
+    /**
+     * Costruisce il DTO temporaneo per verificare la disponibilità della sala di destinazione
+     * basandosi sulla pianificazione del master originale.
+     */
+    private PrenotazioneRequestDTO costruisciCheckRequestDaMaster(Event masterOriginale, String salaDestinazione) {
+        PrenotazioneRequestDTO checkRequest = new PrenotazioneRequestDTO();
+        checkRequest.setSalaEmail(salaDestinazione);
+        checkRequest.setStart(masterOriginale.getStart().getDateTime());
+        checkRequest.setEnd(masterOriginale.getEnd().getDateTime());
+        if (masterOriginale.getRecurrence() != null && masterOriginale.getRecurrence().getPattern() != null) {
+            var p = masterOriginale.getRecurrence().getPattern();
+            checkRequest.setPattern(p.getType() != null ? p.getType().name().toLowerCase() : null);
+            checkRequest.setIntervallo(p.getInterval());
+            if (p.getDaysOfWeek() != null) {
+                checkRequest.setGiorniSettimana(
+                        p.getDaysOfWeek().stream().map(d -> d.name()).collect(Collectors.toList()));
             }
+        }
+        if (masterOriginale.getRecurrence() != null && masterOriginale.getRecurrence().getRange() != null) {
+            checkRequest.setDataFine(masterOriginale.getRecurrence().getRange().getEndDate() != null
+                    ? masterOriginale.getRecurrence().getRange().getEndDate().toString()
+                    : null);
+        }
+        return checkRequest;
+    }
 
-            String tipoModifica = request.getTipoModifica();
-            boolean modificaSerie = "SERIE".equals(tipoModifica);
+    /**
+     * Clona ricorsivamente la struttura di ricorrenza (pattern e range) di un evento Microsoft Graph.
+     */
+    private PatternedRecurrence clonaRicorrenza(PatternedRecurrence recurrenceOriginale) {
+        var nuovaRecurrence = new PatternedRecurrence();
+        if (recurrenceOriginale.getPattern() != null) {
+            var nuovoPattern = new RecurrencePattern();
+            nuovoPattern.setType(recurrenceOriginale.getPattern().getType());
+            nuovoPattern.setInterval(recurrenceOriginale.getPattern().getInterval());
+            if (recurrenceOriginale.getPattern().getDaysOfWeek() != null) {
+                nuovoPattern.setDaysOfWeek(recurrenceOriginale.getPattern().getDaysOfWeek());
+            }
+            if (recurrenceOriginale.getPattern().getDayOfMonth() != null) {
+                nuovoPattern.setDayOfMonth(recurrenceOriginale.getPattern().getDayOfMonth());
+            }
+            nuovaRecurrence.setPattern(nuovoPattern);
+        }
+        if (recurrenceOriginale.getRange() != null) {
+            var nuovoRange = new RecurrenceRange();
+            nuovoRange.setType(recurrenceOriginale.getRange().getType());
+            nuovoRange.setStartDate(recurrenceOriginale.getRange().getStartDate());
+            nuovoRange.setEndDate(recurrenceOriginale.getRange().getEndDate());
+            nuovoRange.setNumberOfOccurrences(recurrenceOriginale.getRange().getNumberOfOccurrences());
+            nuovaRecurrence.setRange(nuovoRange);
+        }
+        return nuovaRecurrence;
+    }
 
-            // Esclude dal controllo di disponibilità l'evento stesso o il
-            // master della serie in modifica
+    /**
+     * Elimina l'evento originale sulla sala di partenza con rollback compensativo
+     * in caso di fallimento, per scongiurare duplicati tra sale.
+     */
+    private void eliminaOriginaleConRollback(String salaOriginale, String idDaCancellare,
+            PrenotazioneRequestDTO request, PrenotazioneDTO nuovaPrenotazione) {
+        try {
+            calendarGateway.eliminaEvento(salaOriginale, idDaCancellare);
+        } catch (Exception e) {
+            // Rollback compensativo: elimina l'evento appena creato per evitare la persistenza di duplicati
+            log.error(
+                    "Cancellazione evento originale {} su sala {} fallita. Tento rollback dell'evento creato {} su sala {}",
+                    idDaCancellare, salaOriginale, nuovaPrenotazione.getId(), request.getSalaEmail(), e);
+            try {
+                calendarGateway.eliminaEvento(request.getSalaEmail(), nuovaPrenotazione.getId());
+                log.info("Rollback completato con successo: eliminato evento {}", nuovaPrenotazione.getId());
+            } catch (Exception rollbackEx) {
+                log.error("[SECURITY_INCIDENT - ROLLBACK_FAILURE] Rollback fallito per ID {} su sala {}: {}",
+                        nuovaPrenotazione.getId(), request.getSalaEmail(), rollbackEx.getMessage());
+            }
+            throw new IllegalStateException(
+                    "Impossibile completare il cambio sala: cancellazione fallita sulla sala precedente.", e);
+        }
+    }
+
+    /**
+     * Esegue la modifica di un evento all'interno della stessa sala sotto lock esclusivo.
+     */
+    private PrenotazioneDTO modificaNellaStessaSala(String eventId, PrenotazioneRequestDTO request, Jwt jwt,
+            boolean modificabile) {
+        return conLockSala(request.getSalaEmail(), () -> {
+            boolean modificaSerie = "SERIE".equals(request.getTipoModifica());
             String seriesMasterIdDaEscludere = modificaSerie
                     ? ((request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank())
                             ? request.getSeriesMasterId()
@@ -438,100 +451,110 @@ public class PrenotazioniService {
             verificaDisponibilita(request, eventId, seriesMasterIdDaEscludere, jwt);
 
             if (modificaSerie) {
-                // Aggiornamento Series Master su Microsoft Graph
-                String idSuCuiOperare = (request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank())
-                        ? request.getSeriesMasterId()
-                        : eventId;
-
-                var event = new Event();
-                mapper.impostaTitoloEDescrizione(event, request);
-
-                String nuovoStartDateTime;
-                String nuovoEndDateTime;
-                boolean orarioModificato = true;
-
-                try {
-                    // Recupera il master per preservarne la data d'inizio originale calcolando il
-                    // nuovo orario giornaliero
-                    var existingMaster = calendarGateway.getEvento(request.getSalaEmail(), idSuCuiOperare);
-
-                    String dataOriginaleMaster = existingMaster.getStart().getDateTime().substring(0, 10);
-
-                    LocalDateTime reqStart = LocalDateTime.parse(request.getStart().substring(0, 19));
-                    LocalDateTime reqEnd = LocalDateTime.parse(request.getEnd().substring(0, 19));
-                    long durataMinuti = java.time.Duration.between(reqStart, reqEnd).toMinutes();
-
-                    String nuovoOrario = request.getStart().substring(11, 19);
-                    nuovoStartDateTime = dataOriginaleMaster + "T" + nuovoOrario;
-
-                    LocalDateTime nuovoEndLDT = LocalDateTime.parse(dataOriginaleMaster + "T" + nuovoOrario)
-                            .plusMinutes(durataMinuti);
-                    nuovoEndDateTime = nuovoEndLDT.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
-
-                    // Se l'orario è invariato (solo titolo o descrizione modificati), non invia start/end
-                    // nel PATCH per preservare eventuali eccezioni di date già modificate nella serie
-                    String masterStartOriginale = existingMaster.getStart() != null
-                            ? existingMaster.getStart().getDateTime()
-                            : "";
-                    if (masterStartOriginale.length() >= 19
-                            && masterStartOriginale.substring(11, 19).equals(nuovoOrario)) {
-                        orarioModificato = false;
-                    }
-
-                    log.debug("Modifica SERIE: data master {} con orario {} -> start={}, end={}, orarioModificato={}",
-                            dataOriginaleMaster, nuovoOrario, nuovoStartDateTime, nuovoEndDateTime, orarioModificato);
-                } catch (Exception e) {
-                    log.warn(
-                            "Impossibile recuperare il master per preservare la data originale, uso i valori della request: {}",
-                            e.getMessage());
-                    nuovoStartDateTime = request.getStart();
-                    nuovoEndDateTime = request.getEnd();
-                }
-
-                if (orarioModificato) {
-                    var start = new DateTimeTimeZone();
-                    start.setDateTime(nuovoStartDateTime);
-                    start.setTimeZone("Europe/Rome");
-                    event.setStart(start);
-
-                    var end = new DateTimeTimeZone();
-                    end.setDateTime(nuovoEndDateTime);
-                    end.setTimeZone("Europe/Rome");
-                    event.setEnd(end);
-                }
-
-                var updatedEvent = calendarGateway.aggiornaEvento(request.getSalaEmail(), idSuCuiOperare, event);
-                log.info("Prenotazione (serie, ID {}) modificata con successo", idSuCuiOperare);
-                return mapper.mapToDTO(updatedEvent, request.getSalaEmail(), modificabile);
+                return modificaSerie(eventId, request, modificabile);
             } else {
-                // Aggiornamento della singola occorrenza: aggiorna solo i dettagli di questa
-                // specifica istanza
-                var event = new Event();
-                mapper.impostaTitoloEDescrizione(event, request);
+                return modificaOccorrenzaSingola(eventId, request, modificabile);
+            }
+        });
+    }
 
-                var start = new DateTimeTimeZone();
-                start.setDateTime(request.getStart());
-                start.setTimeZone("Europe/Rome");
-                event.setStart(start);
+    private record OrariSerie(String start, String end, boolean orarioModificato) {}
 
-                var end = new DateTimeTimeZone();
-                end.setDateTime(request.getEnd());
-                end.setTimeZone("Europe/Rome");
-                event.setEnd(end);
+    /**
+     * Calcola gli orari start/end preservando la data d'inizio originale del master della serie.
+     * Se l'orario giornaliero è invariato, orarioModificato è false per non inviare start/end nel PATCH.
+     */
+    private OrariSerie calcolaOrariSerie(PrenotazioneRequestDTO request, String salaEmail, String idSuCuiOperare) {
+        String nuovoStartDateTime;
+        String nuovoEndDateTime;
+        boolean orarioModificato = true;
 
-                var updatedEvent = calendarGateway.aggiornaEvento(request.getSalaEmail(), eventId, event);
-                log.info("Prenotazione (occorrenza singola) {} modificata con successo", eventId);
-                return mapper.mapToDTO(updatedEvent, request.getSalaEmail(), modificabile);
+        try {
+            var existingMaster = calendarGateway.getEvento(salaEmail, idSuCuiOperare);
+            String dataOriginaleMaster = existingMaster.getStart().getDateTime().substring(0, 10);
+
+            LocalDateTime reqStart = LocalDateTime.parse(request.getStart().substring(0, 19));
+            LocalDateTime reqEnd = LocalDateTime.parse(request.getEnd().substring(0, 19));
+            long durataMinuti = java.time.Duration.between(reqStart, reqEnd).toMinutes();
+
+            String nuovoOrario = request.getStart().substring(11, 19);
+            nuovoStartDateTime = dataOriginaleMaster + "T" + nuovoOrario;
+
+            LocalDateTime nuovoEndLDT = LocalDateTime.parse(dataOriginaleMaster + "T" + nuovoOrario)
+                    .plusMinutes(durataMinuti);
+            nuovoEndDateTime = nuovoEndLDT.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
+
+            String masterStartOriginale = existingMaster.getStart() != null
+                    ? existingMaster.getStart().getDateTime()
+                    : "";
+            if (masterStartOriginale.length() >= 19
+                    && masterStartOriginale.substring(11, 19).equals(nuovoOrario)) {
+                orarioModificato = false;
             }
 
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Operazione interrotta durante l'acquisizione del lock", ie);
-        } finally {
-            if (lockAcquired) {
-                lock.unlock();
-            }
+            log.debug("Modifica SERIE: data master {} con orario {} -> start={}, end={}, orarioModificato={}",
+                    dataOriginaleMaster, nuovoOrario, nuovoStartDateTime, nuovoEndDateTime, orarioModificato);
+        } catch (Exception e) {
+            log.warn(
+                    "Impossibile recuperare il master per preservare la data originale, uso i valori della request: {}",
+                    e.getMessage());
+            nuovoStartDateTime = request.getStart();
+            nuovoEndDateTime = request.getEnd();
         }
+
+        return new OrariSerie(nuovoStartDateTime, nuovoEndDateTime, orarioModificato);
+    }
+
+    /**
+     * Aggiorna il Series Master di una serie ricorrente tramite PATCH su Microsoft Graph.
+     */
+    private PrenotazioneDTO modificaSerie(String eventId, PrenotazioneRequestDTO request, boolean modificabile) {
+        String idSuCuiOperare = (request.getSeriesMasterId() != null && !request.getSeriesMasterId().isBlank())
+                ? request.getSeriesMasterId()
+                : eventId;
+
+        var event = new Event();
+        mapper.impostaTitoloEDescrizione(event, request);
+
+        OrariSerie orari = calcolaOrariSerie(request, request.getSalaEmail(), idSuCuiOperare);
+        if (orari.orarioModificato()) {
+            var start = new DateTimeTimeZone();
+            start.setDateTime(orari.start());
+            start.setTimeZone("Europe/Rome");
+            event.setStart(start);
+
+            var end = new DateTimeTimeZone();
+            end.setDateTime(orari.end());
+            end.setTimeZone("Europe/Rome");
+            event.setEnd(end);
+        }
+
+        var updatedEvent = calendarGateway.aggiornaEvento(request.getSalaEmail(), idSuCuiOperare, event);
+        log.info("Prenotazione (serie, ID {}) modificata con successo", idSuCuiOperare);
+        return mapper.mapToDTO(updatedEvent, request.getSalaEmail(), modificabile);
+    }
+
+    /**
+     * Aggiorna una singola istanza/occorrenza di una serie ricorrente su Microsoft Graph.
+     */
+    private PrenotazioneDTO modificaOccorrenzaSingola(String eventId, PrenotazioneRequestDTO request,
+            boolean modificabile) {
+        var event = new Event();
+        mapper.impostaTitoloEDescrizione(event, request);
+
+        var start = new DateTimeTimeZone();
+        start.setDateTime(request.getStart());
+        start.setTimeZone("Europe/Rome");
+        event.setStart(start);
+
+        var end = new DateTimeTimeZone();
+        end.setDateTime(request.getEnd());
+        end.setTimeZone("Europe/Rome");
+        event.setEnd(end);
+
+        var updatedEvent = calendarGateway.aggiornaEvento(request.getSalaEmail(), eventId, event);
+        log.info("Prenotazione (occorrenza singola) {} modificata con successo", eventId);
+        return mapper.mapToDTO(updatedEvent, request.getSalaEmail(), modificabile);
     }
 
     /**
@@ -562,14 +585,7 @@ public class PrenotazioniService {
                 tipoCancellazione, seriesMasterId);
         verificaAdmin(jwt);
 
-        ReentrantLock lock = getLockPerSala(salaEmail);
-        boolean lockAcquired = false;
-        try {
-            lockAcquired = lock.tryLock(10, TimeUnit.SECONDS);
-            if (!lockAcquired) {
-                throw new IllegalStateException("Timeout acquisizione lock per la sala: " + salaEmail);
-            }
-
+        conLockSala(salaEmail, () -> {
             String idSuCuiOperare = "SERIE".equals(tipoCancellazione) && seriesMasterId != null
                     && !seriesMasterId.isBlank()
                             ? seriesMasterId
@@ -645,15 +661,7 @@ public class PrenotazioniService {
                     throw apiEx;
                 }
             }
-
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Operazione interrotta durante l'acquisizione del lock", ie);
-        } finally {
-            if (lockAcquired) {
-                lock.unlock();
-            }
-        }
+        });
     }
 
     // --- Metodi privati di supporto ---
@@ -766,5 +774,37 @@ public class PrenotazioniService {
         validaSalaAutorizzata(salaEmail);
         String chiave = salaEmail.trim().toLowerCase();
         return lockPerSala.computeIfAbsent(chiave, k -> new ReentrantLock());
+    }
+
+    /**
+     * Esegue un'operazione con valore di ritorno sotto il lock esclusivo per la sala indicata.
+     */
+    private <T> T conLockSala(String salaEmail, Supplier<T> operazione) {
+        ReentrantLock lock = getLockPerSala(salaEmail);
+        boolean lockAcquired = false;
+        try {
+            lockAcquired = lock.tryLock(10, TimeUnit.SECONDS);
+            if (!lockAcquired) {
+                throw new IllegalStateException("Timeout acquisizione lock per la sala: " + salaEmail);
+            }
+            return operazione.get();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Operazione interrotta durante l'acquisizione del lock", ie);
+        } finally {
+            if (lockAcquired) {
+                lock.unlock();
+            }
+        }
+    }
+
+    /**
+     * Esegue un'operazione senza valore di ritorno sotto il lock esclusivo per la sala indicata.
+     */
+    private void conLockSala(String salaEmail, Runnable operazione) {
+        conLockSala(salaEmail, () -> {
+            operazione.run();
+            return null;
+        });
     }
 }

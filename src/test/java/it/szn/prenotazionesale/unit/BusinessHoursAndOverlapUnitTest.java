@@ -557,4 +557,113 @@ public class BusinessHoursAndOverlapUnitTest {
             assertThat(resOffset).isNotNull();
         }
     }
+
+    @Nested
+    @DisplayName("4. Modifica Serie nella Stessa Sala (tipoModifica=SERIE)")
+    class ModificaSerieStessaSalaTests {
+
+        @Test
+        @DisplayName("Test 1: Orario del master invariato -> l'event passato ad aggiornaEvento ha start e end a null")
+        void testModificaSerie_OrarioInvariato_StartEndNull() {
+            // Master esistente dalle 10:00:00 alle 11:00:00 con data 2026-09-01
+            Event master = createGraphEvent("master-123", "2026-09-01T10:00:00", "2026-09-01T11:00:00");
+            when(calendarGateway.getEvento(eq(SALA_TEST), eq("master-123"))).thenReturn(master);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(Collections.emptyList());
+            when(calendarGateway.aggiornaEvento(eq(SALA_TEST), eq("master-123"), any())).thenReturn(master);
+
+            // Richiesta con stessa ora (10:00:00 -> 11:00:00) su data diversa
+            PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
+                    .salaEmail(SALA_TEST)
+                    .salaEmailOriginale(SALA_TEST)
+                    .titolo("Meeting Serie Orario Invariato")
+                    .start("2026-11-10T10:00:00")
+                    .end("2026-11-10T11:00:00")
+                    .tipoModifica("SERIE")
+                    .seriesMasterId("master-123")
+                    .build();
+
+            prenotazioniService.modificaPrenotazione("evt-occ-1", request, createAdminJwt());
+
+            ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
+            verify(calendarGateway).aggiornaEvento(eq(SALA_TEST), eq("master-123"), captor.capture());
+
+            Event captured = captor.getValue();
+            assertThat(captured).isNotNull();
+            assertThat(captured.getStart()).isNull();
+            assertThat(captured.getEnd()).isNull();
+            assertThat(captured.getSubject()).isEqualTo("Meeting Serie Orario Invariato");
+        }
+
+        @Test
+        @DisplayName("Test 2: Orario del master modificato -> lo start usa data del master + orario request, end calcolato con durata")
+        void testModificaSerie_OrarioModificato_CalcolaStartEndConDataMaster() {
+            // Master originale: data 2026-09-01, orario 10:00:00 -> 11:00:00 (durata 60 min)
+            Event master = createGraphEvent("master-123", "2026-09-01T10:00:00", "2026-09-01T11:00:00");
+            when(calendarGateway.getEvento(eq(SALA_TEST), eq("master-123"))).thenReturn(master);
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(Collections.emptyList());
+            when(calendarGateway.aggiornaEvento(eq(SALA_TEST), eq("master-123"), any())).thenReturn(master);
+
+            // Richiesta con nuovo orario: 14:30:00 -> 16:00:00 (durata 90 min)
+            PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
+                    .salaEmail(SALA_TEST)
+                    .salaEmailOriginale(SALA_TEST)
+                    .titolo("Meeting Serie Orario Modificato")
+                    .start("2026-11-10T14:30:00")
+                    .end("2026-11-10T16:00:00")
+                    .tipoModifica("SERIE")
+                    .seriesMasterId("master-123")
+                    .build();
+
+            prenotazioniService.modificaPrenotazione("evt-occ-1", request, createAdminJwt());
+
+            ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
+            verify(calendarGateway).aggiornaEvento(eq(SALA_TEST), eq("master-123"), captor.capture());
+
+            Event captured = captor.getValue();
+            assertThat(captured).isNotNull();
+            assertThat(captured.getStart()).isNotNull();
+            assertThat(captured.getStart().getDateTime()).isEqualTo("2026-09-01T14:30:00");
+            assertThat(captured.getStart().getTimeZone()).isEqualTo("Europe/Rome");
+            assertThat(captured.getEnd()).isNotNull();
+            assertThat(captured.getEnd().getDateTime()).isEqualTo("2026-09-01T16:00:00");
+            assertThat(captured.getEnd().getTimeZone()).isEqualTo("Europe/Rome");
+            assertThat(captured.getSubject()).isEqualTo("Meeting Serie Orario Modificato");
+        }
+
+        @Test
+        @DisplayName("Test 3: Eccezione su getEvento del master -> fallback su start ed end della request")
+        void testModificaSerie_EccezioneGetEventoMaster_FallbackSuRequest() {
+            when(calendarGateway.getEvento(eq(SALA_TEST), eq("master-123")))
+                    .thenThrow(new RuntimeException("Graph API offline"));
+            when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(Collections.emptyList());
+
+            Event dummyUpdated = createGraphEvent("master-123", "2026-11-10T14:30:00", "2026-11-10T16:00:00");
+            when(calendarGateway.aggiornaEvento(eq(SALA_TEST), eq("master-123"), any())).thenReturn(dummyUpdated);
+
+            PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
+                    .salaEmail(SALA_TEST)
+                    .salaEmailOriginale(SALA_TEST)
+                    .titolo("Meeting Serie Fallback")
+                    .start("2026-11-10T14:30:00")
+                    .end("2026-11-10T16:00:00")
+                    .tipoModifica("SERIE")
+                    .seriesMasterId("master-123")
+                    .build();
+
+            prenotazioniService.modificaPrenotazione("evt-occ-1", request, createAdminJwt());
+
+            ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
+            verify(calendarGateway).aggiornaEvento(eq(SALA_TEST), eq("master-123"), captor.capture());
+
+            Event captured = captor.getValue();
+            assertThat(captured).isNotNull();
+            assertThat(captured.getStart()).isNotNull();
+            assertThat(captured.getStart().getDateTime()).isEqualTo("2026-11-10T14:30:00");
+            assertThat(captured.getStart().getTimeZone()).isEqualTo("Europe/Rome");
+            assertThat(captured.getEnd()).isNotNull();
+            assertThat(captured.getEnd().getDateTime()).isEqualTo("2026-11-10T16:00:00");
+            assertThat(captured.getEnd().getTimeZone()).isEqualTo("Europe/Rome");
+            assertThat(captured.getSubject()).isEqualTo("Meeting Serie Fallback");
+        }
+    }
 }
