@@ -15,6 +15,12 @@ public class AppConfig {
     private String adminRole;
     private Cors cors = new Cors();
     private Azure azure = new Azure();
+    private Security security = new Security();
+
+    @Data
+    public static class Security {
+        private String trustedProxies = "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
+    }
 
     @Data
     public static class Cors {

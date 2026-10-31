@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * - Max 120 richieste/minuto per operazioni di lettura (GET)
  * - Max 30 richieste/minuto per operazioni di scrittura (POST, PATCH, DELETE, PUT)
  * Include protezione anti-OOM con pulizia automatica delle voci scadute,
- * validazione anti-spoofing su X-Forwarded-For e propagazione header CORS su risposte 429.
+ * validazione anti-spoofing tramite ClientIpResolver e propagazione header CORS su risposte 429.
  */
 @Slf4j
 @Component
@@ -38,15 +38,25 @@ public class RateLimitingFilter implements Filter {
     private static final int MAX_TRACKED_CLIENTS = 10_000;
 
     private final AppConfig appConfig;
+    private final ClientIpResolver clientIpResolver;
     private final ConcurrentHashMap<String, RequestCounter> requestCounts = new ConcurrentHashMap<>();
 
     @Autowired
-    public RateLimitingFilter(AppConfig appConfig) {
+    public RateLimitingFilter(AppConfig appConfig, ClientIpResolver clientIpResolver) {
         this.appConfig = appConfig;
+        this.clientIpResolver = (clientIpResolver != null) ? clientIpResolver : new ClientIpResolver(appConfig);
+    }
+
+    public RateLimitingFilter(AppConfig appConfig) {
+        this(appConfig, new ClientIpResolver(appConfig));
+    }
+
+    public RateLimitingFilter(ClientIpResolver clientIpResolver) {
+        this(null, clientIpResolver);
     }
 
     public RateLimitingFilter() {
-        this.appConfig = null;
+        this(null, new ClientIpResolver());
     }
 
     private static class RequestCounter {
@@ -135,26 +145,7 @@ public class RateLimitingFilter implements Filter {
     }
 
     private String extractClientIp(HttpServletRequest request) {
-        String remoteAddr = request.getRemoteAddr();
-        if (isTrustedProxy(remoteAddr)) {
-            String xForwardedFor = request.getHeader("X-Forwarded-For");
-            if (xForwardedFor != null && !xForwardedFor.isBlank()) {
-                return xForwardedFor.split(",")[0].trim();
-            }
-        }
-        return remoteAddr;
-    }
-
-    private boolean isTrustedProxy(String ip) {
-        if (ip == null || ip.isBlank()) {
-            return false;
-        }
-        return "127.0.0.1".equals(ip)
-                || "::1".equals(ip)
-                || "0:0:0:0:0:0:0:1".equals(ip)
-                || ip.startsWith("10.")
-                || ip.startsWith("192.168.")
-                || ip.matches("^172\\.(1[6-9]|2[0-9]|3[0-1])\\..*");
+        return clientIpResolver.resolve(request);
     }
 }
 

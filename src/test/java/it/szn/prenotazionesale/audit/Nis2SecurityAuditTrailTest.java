@@ -342,7 +342,8 @@ class Nis2SecurityAuditTrailTest {
         request.setRemoteAddr("127.0.0.1");
 
         String clientIp = auditService.extractClientIp(request);
-        assertEquals("203.0.113.195", clientIp, "Deve estrarre il primo IP della catena (client originale)");
+        assertEquals("150.172.238.178", clientIp,
+                "Deve estrarre il primo IP non fidato da destra verso sinistra (anti-spoofing)");
 
         // Test fallback con request nulla o header assente
         assertEquals("UNKNOWN", auditService.extractClientIp(null));

@@ -6,8 +6,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
+
+import it.szn.prenotazionesale.config.ClientIpResolver;
 
 import java.util.Collections;
 import java.util.List;
@@ -28,6 +31,16 @@ public class SecurityAuditService {
             "(?i)(client_secret|clientSecret|password|secret)\\s*[=:]\\s*[^\\s,;\"']+");
 
     private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+    private final ClientIpResolver clientIpResolver;
+
+    @Autowired
+    public SecurityAuditService(ClientIpResolver clientIpResolver) {
+        this.clientIpResolver = (clientIpResolver != null) ? clientIpResolver : new ClientIpResolver();
+    }
+
+    public SecurityAuditService() {
+        this(new ClientIpResolver());
+    }
 
     public String sanitizeSensitiveText(String text) {
         if (text == null || text.isBlank()) {
@@ -124,11 +137,7 @@ public class SecurityAuditService {
         if (request == null) {
             return "UNKNOWN";
         }
-        String xForwardedFor = request.getHeader("X-Forwarded-For");
-        if (xForwardedFor != null && !xForwardedFor.isBlank()) {
-            return xForwardedFor.split(",")[0].trim();
-        }
-        return request.getRemoteAddr();
+        return clientIpResolver.resolve(request);
     }
 }
 
