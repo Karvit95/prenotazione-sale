@@ -32,9 +32,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.locks.ReentrantLock;
@@ -228,7 +226,7 @@ public class PrenotazioniService {
         }
 
         // Se tutte le sale hanno fallito, rilancia l'errore originale del primo task fallito
-        if (saleNonDisponibili.size() == tasks.size()) {
+        if (!tasks.isEmpty() && saleNonDisponibili.size() == tasks.size() && primoTaskFallito != null) {
             primoTaskFallito.future().join();
         }
 

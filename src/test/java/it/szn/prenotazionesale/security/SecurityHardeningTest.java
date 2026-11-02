@@ -15,6 +15,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.security.oauth2.jwt.Jwt;
 
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 
@@ -90,14 +91,16 @@ class SecurityHardeningTest {
     @Test
     void testSec06_RecurrenceDoS_RejectsSeriesOverOneYear() {
         Jwt jwt = buildMockAdminJwt();
+        LocalDate startDate = LocalDate.now().plusDays(7);
+        LocalDate endDate = startDate.plusYears(5);
         PrenotazioneRequestDTO req = PrenotazioneRequestDTO.builder()
                 .salaEmail("sala1@szn.it")
                 .titolo("Riunione")
-                .start("2026-11-01T09:00:00")
-                .end("2026-11-01T10:00:00")
+                .start(startDate.atTime(9, 0).toString())
+                .end(startDate.atTime(10, 0).toString())
                 .pattern("daily")
                 .intervallo(1)
-                .dataFine("2035-11-01")
+                .dataFine(endDate.toString())
                 .build();
 
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () ->
