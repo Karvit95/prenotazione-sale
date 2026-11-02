@@ -286,26 +286,27 @@ public class BusinessHoursAndOverlapUnitTest {
         @Test
         @DisplayName("Dovrebbe rilevare conflitto quando una serie ricorrente collide con un evento singolo esistente")
         void testOverlap_RecurringDailySeriesCollidesWithExistingSingleEvent() {
-            // Esistente singolo mercoledì 2026-11-04 10:00 -> 11:00
-            Event existingEvent = createGraphEvent("evt-wed", "2026-11-04T10:00:00", "2026-11-04T11:00:00");
+            // Esistente singolo mercoledì 2026-11-11 10:00 -> 11:00
+            Event existingEvent = createGraphEvent("evt-wed", "2026-11-11T10:00:00", "2026-11-11T10:00:00");
+            existingEvent.getEnd().setDateTime("2026-11-11T11:00:00");
             when(calendarGateway.getEventi(eq(SALA_TEST), any(), any())).thenReturn(List.of(existingEvent));
 
-            // Richiesta: serie daily da lunedì 2026-11-02 a venerdì 2026-11-06 (orario 10:00-11:00)
+            // Richiesta: serie daily da lunedì 2026-11-09 a venerdì 2026-11-13 (orario 10:00-11:00)
             PrenotazioneRequestDTO request = PrenotazioneRequestDTO.builder()
                     .salaEmail(SALA_TEST)
                     .titolo("Serie Daily")
-                    .start("2026-11-02T10:00:00")
-                    .end("2026-11-02T11:00:00")
+                    .start("2026-11-09T10:00:00")
+                    .end("2026-11-09T11:00:00")
                     .pattern("daily")
                     .intervallo(1)
-                    .dataFine("2026-11-06")
+                    .dataFine("2026-11-13")
                     .build();
 
             IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () ->
                     prenotazioniService.creaPrenotazione(request, createAdminJwt())
             );
 
-            assertThat(ex.getMessage()).contains("gia occupata").contains("2026-11-04");
+            assertThat(ex.getMessage()).contains("gia occupata").contains("2026-11-11");
         }
 
         @Test
