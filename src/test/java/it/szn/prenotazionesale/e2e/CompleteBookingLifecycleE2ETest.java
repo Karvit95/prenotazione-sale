@@ -2,9 +2,7 @@ package it.szn.prenotazionesale.e2e;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microsoft.graph.models.DateTimeTimeZone;
-import com.microsoft.graph.models.EmailAddress;
 import com.microsoft.graph.models.Event;
-import com.microsoft.graph.models.Recipient;
 import it.szn.prenotazionesale.graph.GraphCalendarGateway;
 import it.szn.prenotazionesale.model.PrenotazioneRequestDTO;
 import it.szn.prenotazionesale.model.SalaDTO;
