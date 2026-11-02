@@ -198,7 +198,11 @@ public class PrenotazioniService {
                 .collect(Collectors.toList());
 
         // Attende il completamento di tutti i task senza propagare anticipatamente eccezioni
-        CompletableFuture.allOf(tasks.stream().map(SalaTask::future).toArray(CompletableFuture[]::new))
+        CompletableFuture<?>[] futures = new CompletableFuture<?>[tasks.size()];
+        for (int i = 0; i < tasks.size(); i++) {
+            futures[i] = tasks.get(i).future();
+        }
+        CompletableFuture.allOf(futures)
                 .exceptionally(ex -> null)
                 .join();
 
