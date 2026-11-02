@@ -16,10 +16,10 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 @Slf4j
 @RestController
@@ -62,9 +62,15 @@ public class PrenotazioniController {
         if (response.isParziale()) {
             int n = response.getSaleNonDisponibili().size();
             int tot = response.getTotaleSale() > 0 ? response.getTotaleSale() : n;
-            String emailElencate = response.getSaleNonDisponibili().stream()
-                    .map(SalaNonDisponibileDTO::getSalaEmail)
-                    .collect(Collectors.joining(", "));
+            List<String> emailList = new ArrayList<>();
+            if (response.getSaleNonDisponibili() != null) {
+                for (SalaNonDisponibileDTO snd : response.getSaleNonDisponibili()) {
+                    if (snd != null && snd.getSalaEmail() != null && !snd.getSalaEmail().isBlank()) {
+                        emailList.add(snd.getSalaEmail());
+                    }
+                }
+            }
+            String emailElencate = String.join(", ", emailList);
             String correlationId = UUID.randomUUID().toString();
             String msg = String.format("%d sale su %d non disponibili: %s", n, tot, emailElencate);
             log.warn("GET /api/prenotazioni/tutte - Risultato parziale: {}", msg);
