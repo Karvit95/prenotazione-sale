@@ -173,7 +173,8 @@ public class PrenotazioneMapper {
 
         String descrizionePulita = null;
         if (event.getBody() != null && event.getBody().getContent() != null) {
-            descrizionePulita = validator.stripHtml(event.getBody().getContent());
+            descrizionePulita = validator.rimuoviDatiRiunioneOnline(
+                    validator.stripHtml(event.getBody().getContent()));
         }
 
         return PrenotazioneDTO.builder().id(event.getId())

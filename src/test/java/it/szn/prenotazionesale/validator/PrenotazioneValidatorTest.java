@@ -6,6 +6,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -511,6 +512,107 @@ public class PrenotazioneValidatorTest {
             assertThrows(IllegalArgumentException.class, () -> validator.validaTipoCancellazione("   "));
             assertThrows(IllegalArgumentException.class, () -> validator.validaTipoCancellazione("FOO"));
             assertThrows(IllegalArgumentException.class, () -> validator.validaTipoCancellazione("TUTTE"));
+        }
+    }
+
+    @Nested
+    @DisplayName("10. Rimozione Dati Riunione Online (rimuoviDatiRiunioneOnline)")
+    class RimuoviDatiRiunioneOnlineTests {
+
+        @Test
+        @DisplayName("Dovrebbe rimuovere blocco Teams in italiano conservando il testo utente")
+        void testRimuoviDatiRiunioneOnline_BloccoTeamsItaliano() {
+            String input = "Riunione di progetto.\n\n" + "_".repeat(80)
+                    + "\nMicrosoft Teams Hai bisogno di aiuto?\nPartecipa alla riunione ora\nID riunione: 123 456 789 012\nPasscode: AbCdEf\n"
+                    + "_".repeat(80);
+            String output = validator.rimuoviDatiRiunioneOnline(input);
+            assertEquals("Riunione di progetto.", output);
+        }
+
+        @Test
+        @DisplayName("Dovrebbe rimuovere blocco Teams in inglese senza residui di ID o numeri")
+        void testRimuoviDatiRiunioneOnline_BloccoTeamsInglese() {
+            String input = "Discussione budget 2027.\n\n"
+                    + "________________________________\n"
+                    + "Microsoft Teams\n"
+                    + "Join the meeting now\n"
+                    + "Meeting ID: 987 654 321 000\n"
+                    + "Passcode: secret123\n"
+                    + "Dial in by phone +39 06 1234567,,123456789# Italy, Rome\n"
+                    + "Phone conference ID: 123 456 789#";
+            String output = validator.rimuoviDatiRiunioneOnline(input);
+            assertEquals("Discussione budget 2027.", output);
+            assertFalse(output.contains("Meeting ID"));
+            assertFalse(output.contains("Passcode"));
+            assertFalse(output.contains("987 654"));
+            assertFalse(output.contains("+39 06"));
+        }
+
+        @Test
+        @DisplayName("Dovrebbe rimuovere gli URL dei provider meeting noti mantenendo URL generici")
+        void testRimuoviDatiRiunioneOnline_UrlRimozione() {
+            String input = "Dettagli programma su https://www.szn.it/programma e link riunione: Link: https://teams.microsoft.com/l/meetup-join/abc e https://zoom.us/j/123456789";
+            String output = validator.rimuoviDatiRiunioneOnline(input);
+            assertNotNull(output);
+            assertTrue(output.contains("https://www.szn.it/programma"));
+            assertFalse(output.contains("teams.microsoft.com"));
+            assertFalse(output.contains("zoom.us"));
+        }
+
+        @Test
+        @DisplayName("Dovrebbe lasciare invariato il testo normale senza marcatori")
+        void testRimuoviDatiRiunioneOnline_TestoNormale() {
+            String input = "Riunione con il team, portare il portatile.";
+            String output = validator.rimuoviDatiRiunioneOnline(input);
+            assertEquals("Riunione con il team, portare il portatile.", output);
+        }
+
+        @Test
+        @DisplayName("Non dovrebbe tagliare testo con 'passcode' senza due punti nel mezzo di una frase")
+        void testRimuoviDatiRiunioneOnline_PasscodeInFrase() {
+            String input = "Il passcode del wifi non serve";
+            String output = validator.rimuoviDatiRiunioneOnline(input);
+            assertEquals("Il passcode del wifi non serve", output);
+        }
+
+        @Test
+        @DisplayName("Dovrebbe restituire null se presente solo il blocco Teams senza testo utente")
+        void testRimuoviDatiRiunioneOnline_SoloBloccoTeams() {
+            String input = "________________________________\n"
+                    + "Microsoft Teams\n"
+                    + "Partecipa alla riunione ora\n"
+                    + "ID riunione: 123 456 789\n"
+                    + "Passcode: Abc";
+            assertNull(validator.rimuoviDatiRiunioneOnline(input));
+        }
+
+        @Test
+        @DisplayName("Dovrebbe restituire null per input null o blank")
+        void testRimuoviDatiRiunioneOnline_NullOrBlank() {
+            assertNull(validator.rimuoviDatiRiunioneOnline(null));
+            assertNull(validator.rimuoviDatiRiunioneOnline(""));
+            assertNull(validator.rimuoviDatiRiunioneOnline("   \n\t  "));
+        }
+
+        @Test
+        @DisplayName("Dovrebbe conservare il testo prima del blocco se un separatore precedente non è adiacente")
+        void testRimuoviDatiRiunioneOnline_SeparatoreNonAdiacente() {
+            String input = "Testo iniziale\n__________\nAltro testo utente\nMicrosoft Teams\nPartecipa alla riunione ora";
+            String output = validator.rimuoviDatiRiunioneOnline(input);
+            assertEquals("Testo iniziale\n__________\nAltro testo utente", output);
+        }
+
+        @Test
+        @DisplayName("Dovrebbe processare rapidamente input di grandi dimensioni (200.000 caratteri)")
+        void testRimuoviDatiRiunioneOnline_PerformanceLargeInput() {
+            String block = "Testo normale per simulare payload molto lunghi senza marcatori di riunione. ";
+            String bigInput = block.repeat(2500) + "\n________\n" + block.repeat(500); // oltre 200k caratteri
+            assertTrue(bigInput.length() >= 200_000);
+
+            assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
+                String result = validator.rimuoviDatiRiunioneOnline(bigInput);
+                assertNotNull(result);
+            });
         }
     }
 }

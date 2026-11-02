@@ -309,6 +309,77 @@ public class PrenotazioneMapperTest {
         void testMapToDTO_NullEvent_ThrowsNpe() {
             assertThrows(NullPointerException.class, () -> mapper.mapToDTO(null, "sala-dohrn@szn.it", true));
         }
+
+        @Test
+        @DisplayName("Dovrebbe rimuovere blocco Teams e credenziali da HTML lasciando solo testo utente per tutti i ruoli")
+        void testMapToDTO_RimuoveDatiRiunioneDaHtml() {
+            Event event = new Event();
+            event.setId("evt-teams-1");
+            event.setSubject("Meeting Istituzionale");
+
+            ItemBody body = new ItemBody();
+            body.setContentType(BodyType.Html);
+            body.setContent("<p>Discussione strategica di dipartimento.</p>"
+                    + "<p>________________________________</p>"
+                    + "<p>Microsoft Teams</p>"
+                    + "<p><a href=\"https://teams.microsoft.com/l/meetup-join/19%3ameeting_xyz\">Partecipa alla riunione ora</a></p>"
+                    + "<p>ID riunione: 123 456 789 012</p>"
+                    + "<p>Passcode: AbCdEf</p>");
+            event.setBody(body);
+
+            // Modificabile = true (es. Admin o proprietario)
+            PrenotazioneDTO dtoModificabile = mapper.mapToDTO(event, "sala-dohrn@szn.it", true);
+            assertNotNull(dtoModificabile.getDescrizione());
+            assertEquals("Discussione strategica di dipartimento.", dtoModificabile.getDescrizione());
+            assertFalse(dtoModificabile.getDescrizione().contains("ID riunione"));
+            assertFalse(dtoModificabile.getDescrizione().contains("Passcode"));
+            assertFalse(dtoModificabile.getDescrizione().contains("teams.microsoft.com"));
+
+            // Modificabile = false (altro utente)
+            PrenotazioneDTO dtoNonModificabile = mapper.mapToDTO(event, "sala-dohrn@szn.it", false);
+            assertNotNull(dtoNonModificabile.getDescrizione());
+            assertEquals("Discussione strategica di dipartimento.", dtoNonModificabile.getDescrizione());
+            assertFalse(dtoNonModificabile.getDescrizione().contains("ID riunione"));
+            assertFalse(dtoNonModificabile.getDescrizione().contains("Passcode"));
+            assertFalse(dtoNonModificabile.getDescrizione().contains("teams.microsoft.com"));
+        }
+
+        @Test
+        @DisplayName("Dovrebbe rimuovere URL Teams anche da corpo di solo testo")
+        void testMapToDTO_RimuoveUrlTeamsDaPlainText() {
+            Event event = new Event();
+            event.setId("evt-teams-2");
+            event.setSubject("Sync Veloce");
+
+            ItemBody body = new ItemBody();
+            body.setContentType(BodyType.Text);
+            body.setContent("Link per collegarsi: https://teams.microsoft.com/l/meetup-join/test123");
+            event.setBody(body);
+
+            PrenotazioneDTO dto = mapper.mapToDTO(event, "sala-dohrn@szn.it", false);
+            assertEquals("Link per collegarsi:", dto.getDescrizione());
+            assertFalse(dto.getDescrizione().contains("teams.microsoft.com"));
+        }
+
+        @Test
+        @DisplayName("Dovrebbe impostare descrizione a null se il corpo contiene solo il blocco Teams")
+        void testMapToDTO_SoloBloccoTeamsRestituisceNull() {
+            Event event = new Event();
+            event.setId("evt-teams-3");
+            event.setSubject("Solo Teams");
+
+            ItemBody body = new ItemBody();
+            body.setContentType(BodyType.Text);
+            body.setContent("________________________________\n"
+                    + "Microsoft Teams\n"
+                    + "Partecipa alla riunione ora\n"
+                    + "ID riunione: 999 888 777\n"
+                    + "Passcode: secret");
+            event.setBody(body);
+
+            PrenotazioneDTO dto = mapper.mapToDTO(event, "sala-dohrn@szn.it", true);
+            assertNull(dto.getDescrizione());
+        }
     }
 
     @Nested

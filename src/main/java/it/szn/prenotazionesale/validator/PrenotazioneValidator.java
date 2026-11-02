@@ -12,6 +12,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -309,6 +310,56 @@ public class PrenotazioneValidator {
                 .replaceAll("[ \\t\\x0B\\f]+", " ")
                 .trim();
         return pulito.isBlank() ? null : pulito;
+    }
+
+    private static final Pattern PATTERN_SEPARATORE_BLOCCO =
+            Pattern.compile("(?m)^[ \\t]*_{8,}[ \\t]*$");
+
+    private static final Pattern PATTERN_INIZIO_BLOCCO_RIUNIONE = Pattern.compile(
+            "(?im)^[ \\t]*(microsoft teams\\b"
+          + "|partecipa alla riunione ora|join the meeting now"
+          + "|partecipa (dal|sul) computer|join on your computer"
+          + "|(id riunione|meeting id)[ \\t]*:"
+          + "|(passcode|codice di accesso)[ \\t]*:"
+          + "|chiam(a|are) tramite telefono|dial in by phone"
+          + "|(id conferenza telefonica|phone conference id)[ \\t]*:)");
+
+    private static final Pattern PATTERN_URL_RIUNIONE = Pattern.compile(
+            "(?i)https?://\\S*(teams\\.microsoft\\.com|teams\\.live\\.com|zoom\\.us|meet\\.google\\.com"
+          + "|webex\\.com|gotomeet(ing)?\\.\\w+|whereby\\.com)\\S*");
+
+    private static final Pattern PATTERN_CODICI_ACCESSO = Pattern.compile(
+            "(?i)(id riunione|meeting id|passcode|codice di accesso|id conferenza telefonica"
+          + "|phone conference id)[ \\t]*:[ \\t]*[\\w #-]{3,40}");
+
+    /**
+     * Rimuove da un testo gia' ripulito dall'HTML i dati di accesso a riunioni online:
+     * blocco di invito Teams (dal primo marcatore, includendo la riga separatrice
+     * che lo precede), ID riunione, passcode, PIN telefonico e URL dei provider noti.
+     *
+     * @param testo testo gia' privo di HTML (puo' essere null)
+     * @return testo senza dati di accesso, oppure null se non resta contenuto
+     */
+    public String rimuoviDatiRiunioneOnline(String testo) {
+        if (testo == null || testo.isBlank()) {
+            return null;
+        }
+        String risultato = testo;
+        Matcher inizio = PATTERN_INIZIO_BLOCCO_RIUNIONE.matcher(risultato);
+        if (inizio.find()) {
+            int taglio = inizio.start();
+            Matcher sep = PATTERN_SEPARATORE_BLOCCO.matcher(risultato);
+            while (sep.find() && sep.end() <= inizio.start()) {
+                if (risultato.substring(sep.end(), inizio.start()).isBlank()) {
+                    taglio = sep.start();
+                }
+            }
+            risultato = risultato.substring(0, taglio);
+        }
+        risultato = PATTERN_URL_RIUNIONE.matcher(risultato).replaceAll("");
+        risultato = PATTERN_CODICI_ACCESSO.matcher(risultato).replaceAll("");
+        risultato = risultato.replaceAll("\\n{3,}", "\n\n").trim();
+        return risultato.isBlank() ? null : risultato;
     }
 
     /**
